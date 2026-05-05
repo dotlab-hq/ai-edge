@@ -58,11 +58,6 @@
           "maximum": 9007199254740991
         }
       },
-      "required": [
-        "tokensPerMinute",
-        "requestsPerMinute",
-        "requestsPerDay"
-      ],
       "additionalProperties": false
     },
     "models": {
@@ -88,6 +83,11 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "imageModels": {
+                "default": false,
+                "description": "If true, all models provided by this provider are for image operations (generation or editing) only and will not be selected for chat/completion routes",
+                "type": "boolean"
               },
               "individualLimit": {
                 "default": false,
@@ -120,21 +120,23 @@
                     "maximum": 9007199254740991
                   }
                 },
-                "required": [
-                  "tokensPerMinute",
-                  "requestsPerMinute",
-                  "requestsPerDay"
-                ],
                 "additionalProperties": false
+              },
+              "randomRouting": {
+                "default": false,
+                "description": "If true, when this provider is selected it may route to any model the provider advertises at random",
+                "type": "boolean"
               }
             },
             "required": [
               "id",
               "name",
               "models",
+              "imageModels",
               "individualLimit",
               "baseUrl",
-              "apiKey"
+              "apiKey",
+              "randomRouting"
             ],
             "additionalProperties": false
           }

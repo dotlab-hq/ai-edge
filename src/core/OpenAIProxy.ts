@@ -26,6 +26,8 @@ export class OpenAIProxy {
         this.app.post( '/v1/chat/completions', ( c: Context ) => this.handleChatCompletions( c ) );
         this.app.post( '/v1/embeddings', ( c: Context ) => this.handleEmbeddings( c ) );
         this.app.post( '/v1/completions', ( c: Context ) => this.handleCompletions( c ) );
+        this.app.post( '/v1/images/generations', ( c: Context ) => this.handleImageGenerations( c ) );
+        this.app.post( '/v1/images/edits', ( c: Context ) => this.handleImageEdits( c ) );
     }
 
     private async handleModels( c: Context ) {
@@ -67,6 +69,14 @@ export class OpenAIProxy {
         return this.proxyRequest( c, 'completions' );
     }
 
+    private async handleImageGenerations( c: Context ) {
+        return this.proxyRequest( c, 'images/generations' );
+    }
+
+    private async handleImageEdits( c: Context ) {
+        return this.proxyRequest( c, 'images/edits' );
+    }
+
     private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {
         if ( config.individualLimit && config.rateLimit ) {
             return config.rateLimit;
@@ -97,7 +107,7 @@ export class OpenAIProxy {
             }, 400 );
         }
 
-        const matchingBackends = this.getBackendsForModel( modelName );
+        const matchingBackends = this.getBackendsForModel( modelName, endpoint );
         if ( !matchingBackends.length ) {
             return c.json( {
                 error: {
@@ -110,6 +120,11 @@ export class OpenAIProxy {
         const backends = this.getRoundRobinBackends( modelName, matchingBackends );
 
         for ( const config of backends ) {
+            // If provider requests random routing, choose a random model from that provider
+            const selectedModel = config.randomRouting ? config.models[Math.floor( Math.random() * config.models.length )] : modelName;
+            // Set the model the provider will receive
+            body.model = selectedModel;
+
             const tokens = this.calculateTokenCount( body );
             const rateLimit = this.getEffectiveRateLimit( config );
             const rateCheck = await rateLimitManager.checkAndConsume(
@@ -212,10 +227,23 @@ export class OpenAIProxy {
         return null;
     }
 
-    private getBackendsForModel( modelName: string ): OpenAIModelConfig[] {
-        return CONFIG.models.openai.filter( config =>
-            config.models.some( m => m === modelName )
-        );
+    private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
+        return CONFIG.models.openai.filter( config => {
+            const hasModel = config.models.some( m => m === modelName );
+            if ( !hasModel ) return false;
+
+            // For image endpoints (generation and editing), only allow providers marked as imageModels
+            if ( endpoint === 'images/generations' || endpoint === 'images/edits' ) {
+                return config.imageModels === true;
+            }
+
+            // For chat endpoints, exclude providers marked as imageModels only
+            if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
+                return config.imageModels !== true;
+            }
+
+            return true;
+        } );
     }
 
     private getRoundRobinBackends( modelName: string, backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
@@ -324,6 +352,11 @@ export class OpenAIProxy {
             };
         }
 
+        // Images endpoints use token usage from the response if available
+        if ( endpoint === 'images/generations' || endpoint === 'images/edits' ) {
+            return null;
+        }
+
         return null;
     }
 
@@ -352,6 +385,10 @@ export class OpenAIProxy {
             return this.collectTokenStrings( body.input );
         }
 
+        if ( endpoint === 'images/generations' || endpoint === 'images/edits' ) {
+            return this.collectTokenStrings( body.prompt );
+        }
+
         return this.collectTokenStrings( body );
     }
 
@@ -369,6 +406,10 @@ export class OpenAIProxy {
         }
 
         if ( endpoint === 'embeddings' ) {
+            return [];
+        }
+
+        if ( endpoint === 'images/generations' || endpoint === 'images/edits' ) {
             return [];
         }
 
