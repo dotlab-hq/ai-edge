@@ -232,18 +232,46 @@ export class OpenAIProxy {
             const hasModel = config.models.some( m => m === modelName );
             if ( !hasModel ) return false;
 
-            // For image endpoints (generation and editing), only allow providers marked as imageModels
-            if ( endpoint === 'images/generations' || endpoint === 'images/edits' ) {
-                return config.imageModels === true;
+            // For image endpoints, only allow providers that declare support for the specific operation
+            if ( endpoint === 'images/generations' ) {
+                return this.isImageGenerationEnabled( config );
+            }
+
+            if ( endpoint === 'images/edits' ) {
+                return this.isImageEditingEnabled( config );
             }
 
             // For chat endpoints, exclude providers marked as imageModels only
             if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
-                return config.imageModels !== true;
+                return !this.isImageOnlyConfig( config );
             }
 
             return true;
         } );
+    }
+
+    private isImageGenerationEnabled( config: OpenAIModelConfig ): boolean {
+        const imageModels = config.imageModels;
+        if ( typeof imageModels === 'boolean' ) {
+            return imageModels;
+        }
+        return imageModels?.image_generation === true;
+    }
+
+    private isImageEditingEnabled( config: OpenAIModelConfig ): boolean {
+        const imageModels = config.imageModels;
+        if ( typeof imageModels === 'boolean' ) {
+            return imageModels;
+        }
+        return imageModels?.image_editing === true;
+    }
+
+    private isImageOnlyConfig( config: OpenAIModelConfig ): boolean {
+        const imageModels = config.imageModels;
+        if ( typeof imageModels === 'boolean' ) {
+            return imageModels;
+        }
+        return imageModels?.image_generation === true || imageModels?.image_editing === true;
     }
 
     private getRoundRobinBackends( modelName: string, backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {

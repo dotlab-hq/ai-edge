@@ -86,8 +86,28 @@
               },
               "imageModels": {
                 "default": false,
-                "description": "If true, all models provided by this provider are for image operations (generation or editing) only and will not be selected for chat/completion routes",
-                "type": "boolean"
+                "description": "If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "image_generation": {
+                        "type": "boolean"
+                      },
+                      "image_editing": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "image_generation",
+                      "image_editing"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
               },
               "individualLimit": {
                 "default": false,
