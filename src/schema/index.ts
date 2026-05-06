@@ -10,10 +10,10 @@ const RateLimitSchema = z.object( {
 const ImageModelsSchema = z.union( [
   z.boolean( { error: 'imageModels must be a boolean' } ),
   z.object( {
-    image_generation: z.boolean( { error: 'image_generation must be a boolean' } ),
-    image_editing: z.boolean( { error: 'image_editing must be a boolean' } ),
+    image_generation: z.boolean( { error: 'image_generation must be a boolean' } ).optional(),
+    image_editing: z.boolean( { error: 'image_editing must be a boolean' } ).optional(),
   } ).strict(),
-] ).default( false ).describe( 'If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.' )
+] ).optional().describe( 'If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.' )
 
 const OpenAIModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),

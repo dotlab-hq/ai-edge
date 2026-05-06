@@ -57,7 +57,8 @@ export async function startCommand(): Promise<void> {
       configData = await readConfig( configPath );
     } catch ( err: any ) {
       s.stop( '❌' );
-      p.outro( chalk.red( `❌ ${err.message || 'Invalid configuration'}` ) );
+      console.error( 'Config Error:', err?.message || err );
+      p.outro( chalk.red( `❌ ${err?.message || 'Invalid configuration'}` ) );
       process.exit( 1 );
     }
 
@@ -100,7 +101,7 @@ export async function startCommand(): Promise<void> {
     s2.start( 'Starting server...' );
 
     try {
-      const { default: app } = await import( '../../server' );
+      const { default: app } = await import( '../../../server' );
 
       serve( { fetch: app.fetch, port: portNum } );
 
@@ -122,11 +123,13 @@ export async function startCommand(): Promise<void> {
       } );
     } catch ( err: any ) {
       s2.stop( '❌' );
-      p.outro( chalk.red( `❌ ${err.message || 'Server startup failed'}` ) );
+      console.error( 'Server Startup Error:', err?.message || err );
+      p.outro( chalk.red( `❌ ${err?.message || 'Server startup failed'}` ) );
       process.exit( 1 );
     }
   } catch ( error: any ) {
-    p.outro( chalk.red( `❌ ${error.message || 'Failed to start server'}` ) );
+    console.error( 'Start Command Error:', error?.message || error );
+    p.outro( chalk.red( `❌ ${error?.message || 'Failed to start server'}` ) );
     process.exit( 1 );
   }
 }

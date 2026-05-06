@@ -24,11 +24,12 @@ export class RateLimitManager {
             return { allowed: true };
         }
 
+        const hasTokensPerMinute = typeof rateLimit.tokensPerMinute === 'number';
         const hasRequestsPerMinute = typeof rateLimit.requestsPerMinute === 'number';
         const hasRequestsPerDay = typeof rateLimit.requestsPerDay === 'number';
 
-        // If neither limit is specified, treat as unlimited
-        if ( !hasRequestsPerMinute && !hasRequestsPerDay ) {
+        // If no limits specified, treat as unlimited
+        if ( !hasTokensPerMinute && !hasRequestsPerMinute && !hasRequestsPerDay ) {
             return { allowed: true };
         }
 
@@ -37,7 +38,7 @@ export class RateLimitManager {
         const release = await this.acquireLock( key );
 
         try {
-            const record = await this.getOrCreateBucket( key );
+            const record = await this.getOrCreateBucket( key, rateLimit );
             const now = Date.now();
             const oneDay = 24 * 60 * 60 * 1000;
 
@@ -52,28 +53,33 @@ export class RateLimitManager {
                 return { allowed: false, reason: 'Daily request limit exceeded' };
             }
 
-            // If no requests-per-minute provided, skip token-bucket checks and allow (daily check was above)
-            if ( !hasRequestsPerMinute ) {
+            // Token-bucket algorithm using tokensPerMinute if available, otherwise requestsPerMinute
+            const tokenLimit: number = hasTokensPerMinute
+                ? ( rateLimit.tokensPerMinute as number )
+                : ( hasRequestsPerMinute ? ( rateLimit.requestsPerMinute as number ) : 0 );
+
+            if ( tokenLimit > 0 ) {
+                const tokensPerSecond = tokenLimit / 60;
+                const refillAmount = ( now - record.lastRefill ) / 1000 * tokensPerSecond;
+                record.tokens = Math.min( tokenLimit, record.tokens + refillAmount );
+                record.lastRefill = now;
+
+                if ( record.tokens >= tokens ) {
+                    record.tokens -= tokens;
+                    if ( hasRequestsPerDay ) record.dailyRequests += 1;
+                    await CACHE.setKey( key, record );
+                    return { allowed: true };
+                }
+
+                return { allowed: false, reason: 'Rate limit exceeded' };
+            }
+
+            // No token-based limit, just track daily
+            if ( hasRequestsPerDay ) {
                 record.dailyRequests += 1;
                 await CACHE.setKey( key, record );
-                return { allowed: true };
             }
-
-            // Token-bucket using provided requestsPerMinute
-            const rpm = rateLimit.requestsPerMinute as number;
-            const tokensPerSecond = rpm / 60;
-            const refillAmount = ( now - record.lastRefill ) / 1000 * tokensPerSecond;
-            record.tokens = Math.min( rpm, record.tokens + refillAmount );
-            record.lastRefill = now;
-
-            if ( record.tokens >= tokens ) {
-                record.tokens -= tokens;
-                if ( hasRequestsPerDay ) record.dailyRequests += 1;
-                await CACHE.setKey( key, record );
-                return { allowed: true };
-            }
-
-            return { allowed: false, reason: 'Rate limit exceeded' };
+            return { allowed: true };
         } finally {
             release();
         }
@@ -95,15 +101,22 @@ export class RateLimitManager {
         };
     }
 
-    private async getOrCreateBucket( key: string ): Promise<BucketRecord> {
+    private async getOrCreateBucket( key: string, rateLimit?: RateLimit ): Promise<BucketRecord> {
         const record = await CACHE.getKey<BucketRecord>( key );
         if ( !record ) {
             const now = Date.now();
             const oneDay = 24 * 60 * 60 * 1000;
+            // Initialize tokens based on tokensPerMinute if available, otherwise requestsPerMinute
+            let initialTokens = 1000; // default fallback
+            if ( rateLimit ) {
+                if ( typeof rateLimit.tokensPerMinute === 'number' ) {
+                    initialTokens = rateLimit.tokensPerMinute;
+                } else if ( typeof rateLimit.requestsPerMinute === 'number' ) {
+                    initialTokens = rateLimit.requestsPerMinute;
+                }
+            }
             const newRecord = {
-                // default tokens is a reasonable cap for new buckets; actual enforcement
-                // will depend on whether a provider supplies requestsPerMinute.
-                tokens: 150,
+                tokens: initialTokens,
                 lastRefill: now,
                 dailyRequests: 0,
                 dayStart: Math.floor( now / oneDay ) * oneDay

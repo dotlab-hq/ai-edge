@@ -85,7 +85,6 @@
                 }
               },
               "imageModels": {
-                "default": false,
                 "description": "If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.",
                 "anyOf": [
                   {
@@ -101,10 +100,6 @@
                         "type": "boolean"
                       }
                     },
-                    "required": [
-                      "image_generation",
-                      "image_editing"
-                    ],
                     "additionalProperties": false
                   }
                 ]
@@ -152,7 +147,6 @@
               "id",
               "name",
               "models",
-              "imageModels",
               "individualLimit",
               "baseUrl",
               "apiKey",

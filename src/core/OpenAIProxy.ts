@@ -34,21 +34,24 @@ export class OpenAIProxy {
         try {
             const configs = CONFIG.models.openai;
             if ( !configs.length ) {
+                console.error( '[/v1/models] No backend configured' );
                 return c.json( { error: 'No backend configured' }, 503 );
             }
 
             const firstConfig = this.getNextRoundRobinConfig( '__models__', configs );
             if ( !firstConfig ) {
+                console.error( '[/v1/models] No backend available' );
                 return c.json( { error: 'No backend configured' }, 503 );
             }
 
-            const response = await fetch( `${firstConfig.baseUrl}/v1/models`, {
+            const response = await fetch( this.buildApiUrl( firstConfig, 'models' ), {
                 headers: this.buildHeaders( firstConfig ),
                 ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
             } as RequestInit );
             const data = await response.json();
             return c.json( data, response.status as any );
-        } catch ( error ) {
+        } catch ( error: any ) {
+            console.error( '[/v1/models] Exception:', error?.message || String( error ) );
             return c.json( { error: 'Failed to fetch models' }, 500 );
         }
     }
@@ -87,6 +90,7 @@ export class OpenAIProxy {
     private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1 ): Promise<any> {
         const body = await c.req.json().catch( () => ( {} ) );
         const modelName = body.model;
+        let lastFailure: { status: number; payload: any } | null = null;
 
         if ( !modelName || typeof modelName !== 'string' ) {
             return c.json( {
@@ -109,6 +113,7 @@ export class OpenAIProxy {
 
         const matchingBackends = this.getBackendsForModel( modelName, endpoint );
         if ( !matchingBackends.length ) {
+            console.error( `[${endpoint}] No backends found for model: ${modelName}` );
             return c.json( {
                 error: {
                     message: `Model not found: ${modelName}`,
@@ -118,84 +123,115 @@ export class OpenAIProxy {
         }
 
         const backends = this.getRoundRobinBackends( modelName, matchingBackends );
+        const backendIds = backends.map( b => b.id ).join( ', ' );
+        console.error( `[${endpoint}] Attempting backends for model ${modelName}: ${backendIds}` );
 
         for ( const config of backends ) {
-            // If provider requests random routing, choose a random model from that provider
-            const selectedModel = config.randomRouting ? config.models[Math.floor( Math.random() * config.models.length )] : modelName;
-            // Set the model the provider will receive
-            body.model = selectedModel;
+            const candidateModels = this.getCandidateModelsForProvider( config, modelName );
 
-            const tokens = this.calculateTokenCount( body );
-            const rateLimit = this.getEffectiveRateLimit( config );
-            const rateCheck = await rateLimitManager.checkAndConsume(
-                config.id,
-                tokens,
-                rateLimit
-            );
+            for ( const selectedModel of candidateModels ) {
+                body.model = selectedModel;
 
-            if ( !rateCheck.allowed ) {
-                continue;
-            }
+                const tokens = this.calculateTokenCount( body );
+                const rateLimit = this.getEffectiveRateLimit( config );
+                const rateCheck = await rateLimitManager.checkAndConsume(
+                    config.id,
+                    tokens,
+                    rateLimit
+                );
 
-            try {
-                const url = `${config.baseUrl}/v1/${endpoint}`;
-                const response = await fetch( url, {
-                    method: 'POST',
-                    headers: this.buildHeaders( config ),
-                    body: JSON.stringify( body ),
-                    ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
-                } as RequestInit );
-
-                if ( response.status === 429 ) {
+                if ( !rateCheck.allowed ) {
+                    console.error( `[${endpoint}] Rate limit exceeded for ${config.id} - need ${tokens} tokens, limit: ${rateLimit?.tokensPerMinute || rateLimit?.requestsPerMinute || 'unknown'}/min` );
                     continue;
                 }
 
-                if ( this.isRedirectStatus( response.status ) ) {
-                    const location = response.headers.get( 'location' );
-                    if ( location ) {
-                        const redirectModel = this.extractModelFromLocation( location );
-                        if ( redirectModel && redirectModel !== modelName ) {
-                            body.model = redirectModel;
-                            return this.proxyRequest( c, endpoint, redirectDepth + 1 );
+                try {
+                    const url = this.buildApiUrl( config, endpoint );
+                    const response = await fetch( url, {
+                        method: 'POST',
+                        headers: this.buildHeaders( config ),
+                        body: JSON.stringify( body ),
+                        ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
+                    } as RequestInit );
+
+                    if ( response.status === 429 ) {
+                        continue;
+                    }
+
+                    if ( this.isRedirectStatus( response.status ) ) {
+                        const location = response.headers.get( 'location' );
+                        if ( location ) {
+                            const redirectModel = this.extractModelFromLocation( location );
+                            if ( redirectModel && redirectModel !== modelName ) {
+                                body.model = redirectModel;
+                                return this.proxyRequest( c, endpoint, redirectDepth + 1 );
+                            }
                         }
                     }
-                }
 
-                // Handle streaming responses
-                if ( body.stream === true ) {
-                    c.header( 'Content-Type', 'text/event-stream' );
-                    c.header( 'Cache-Control', 'no-cache' );
-                    c.header( 'Connection', 'keep-alive' );
+                    // Handle streaming responses
+                    if ( body.stream === true ) {
+                        c.header( 'Content-Type', 'text/event-stream' );
+                        c.header( 'Cache-Control', 'no-cache' );
+                        c.header( 'Connection', 'keep-alive' );
 
-                    if ( response.body ) {
-                        return stream( c, async ( streamWriter ) => {
-                            const reader = response.body!.getReader();
-                            const decoder = new TextDecoder();
+                        if ( response.body ) {
+                            return stream( c, async ( streamWriter ) => {
+                                const reader = response.body!.getReader();
+                                const decoder = new TextDecoder();
 
-                            try {
-                                while ( true ) {
-                                    const { done, value } = await reader.read();
-                                    if ( done ) break;
-                                    const chunk = decoder.decode( value, { stream: true } );
-                                    await streamWriter.write( chunk );
+                                try {
+                                    while ( true ) {
+                                        const { done, value } = await reader.read();
+                                        if ( done ) break;
+                                        const chunk = decoder.decode( value, { stream: true } );
+                                        await streamWriter.write( chunk );
+                                    }
+                                } finally {
+                                    reader.releaseLock();
                                 }
-                            } finally {
-                                reader.releaseLock();
-                            }
-                        }, async ( err, streamWriter ) => {
-                            console.error( 'Streaming error:', err );
-                            await streamWriter.writeln( 'An error occurred during streaming' );
-                        } );
+                            }, async ( err, streamWriter ) => {
+                                console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
+                                await streamWriter.writeln( 'An error occurred during streaming' );
+                            } );
+                        }
                     }
-                }
 
-                const data = await response.json();
-                return c.json( this.attachUsageIfMissing( endpoint, body, data ), response.status as any );
-            } catch ( error ) {
-                continue;
+                    const payload = await this.parseResponsePayload( response );
+
+                    if ( !response.ok ) {
+                        lastFailure = {
+                            status: response.status,
+                            payload,
+                        };
+                        console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
+                        continue;
+                    }
+
+                    return c.json( this.attachUsageIfMissing( endpoint, body, payload ), response.status as any );
+                } catch ( error: any ) {
+                    lastFailure = {
+                        status: 502,
+                        payload: {
+                            error: {
+                                message: error?.message || 'Upstream request failed',
+                                type: 'upstream_error'
+                            }
+                        }
+                    };
+                    console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
+                    continue;
+                }
             }
         }
 
+        if ( lastFailure ) {
+            const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
+            console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+            return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
+        }
+
+        console.error( `\n❌ [${endpoint}] ALL PROVIDERS FAILED - No response from any backend\nModel: ${modelName}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
         return c.json( {
             error: {
                 message: 'All providers failed',
@@ -229,24 +265,27 @@ export class OpenAIProxy {
 
     private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
         return CONFIG.models.openai.filter( config => {
-            const hasModel = config.models.some( m => m === modelName );
-            if ( !hasModel ) return false;
+            const matchesRequestedModel = config.models.some( m => m === modelName );
+            const canRouteWithoutModelMatch = config.randomRouting === true;
 
-            // For image endpoints, only allow providers that declare support for the specific operation
+            // For image endpoints, filter by capability and allow random routing
             if ( endpoint === 'images/generations' ) {
-                return this.isImageGenerationEnabled( config );
+                if ( !this.isImageGenerationEnabled( config ) ) return false;
+                return matchesRequestedModel || canRouteWithoutModelMatch;
             }
 
             if ( endpoint === 'images/edits' ) {
-                return this.isImageEditingEnabled( config );
+                if ( !this.isImageEditingEnabled( config ) ) return false;
+                return matchesRequestedModel || canRouteWithoutModelMatch;
             }
 
-            // For chat endpoints, exclude providers marked as imageModels only
+            // For chat/completions/responses, exclude providers marked as imageModels only
             if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
-                return !this.isImageOnlyConfig( config );
+                if ( this.isImageOnlyConfig( config ) ) return false;
+                return matchesRequestedModel || canRouteWithoutModelMatch;
             }
 
-            return true;
+            return matchesRequestedModel || canRouteWithoutModelMatch;
         } );
     }
 
@@ -313,6 +352,68 @@ export class OpenAIProxy {
             'Authorization': `Bearer ${config.apiKey}`,
             'User-Agent': 'ai-edge/1.0',
         };
+    }
+
+    private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {
+        if ( !config.randomRouting ) {
+            return [requestedModel];
+        }
+
+        const uniqueModels = Array.from( new Set( config.models ) );
+        if ( !uniqueModels.length ) {
+            return [requestedModel];
+        }
+
+        const startIndex = Math.floor( Math.random() * uniqueModels.length );
+        return [
+            ...uniqueModels.slice( startIndex ),
+            ...uniqueModels.slice( 0, startIndex ),
+        ];
+    }
+
+    private async parseResponsePayload( response: Response ): Promise<any> {
+        const contentType = response.headers.get( 'content-type' ) ?? '';
+
+        if ( contentType.includes( 'application/json' ) ) {
+            return response.json().catch( () => ( {
+                error: {
+                    message: 'Upstream returned invalid JSON',
+                    type: 'upstream_error'
+                }
+            } ) );
+        }
+
+        const text = await response.text().catch( () => '' );
+        if ( !text ) {
+            return {
+                error: {
+                    message: response.statusText || 'Upstream request failed',
+                    type: 'upstream_error'
+                }
+            };
+        }
+
+        return text;
+    }
+
+    private sendFailurePayload( c: Context, status: number, payload: any ) {
+        if ( payload && typeof payload === 'object' ) {
+            return c.json( payload, status as any );
+        }
+        return c.text( String( payload ?? 'Upstream request failed' ), status as any );
+    }
+
+    private buildApiUrl( config: OpenAIModelConfig, endpoint: string ): string {
+        const baseUrl = this.normalizeBaseUrl( config.baseUrl );
+        return `${baseUrl}/v1/${endpoint}`;
+    }
+
+    private normalizeBaseUrl( baseUrl: string ): string {
+        const trimmed = baseUrl.replace( /\/+$/, '' );
+        if ( trimmed.endsWith( '/v1' ) ) {
+            return trimmed.slice( 0, -3 );
+        }
+        return trimmed;
     }
 
     private calculateTokenCount( body: any ): number {
