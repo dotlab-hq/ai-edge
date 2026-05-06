@@ -127,11 +127,11 @@ export class RateLimitManager {
         return record;
     }
 
-    async getUsage( modelId: string ): Promise<{ requestsUsed: number; dailyRequests: number } | null> {
+    async getUsage( modelId: string ): Promise<{ tokensRemaining: number; dailyRequests: number } | null> {
         const key = `${this.keyPrefix}${modelId}`;
         const record = await CACHE.getKey<BucketRecord>( key );
         return record ? {
-            requestsUsed: Math.ceil( record.tokens ),
+            tokensRemaining: Math.ceil( record.tokens ),
             dailyRequests: record.dailyRequests
         } : null;
     }

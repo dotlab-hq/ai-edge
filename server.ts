@@ -18,8 +18,14 @@ async function loadStats() {
         for ( const config of CONFIG.models.openai ) {
             const usage = await rateLimitManager.getUsage( config.id );
             if ( usage ) {
+                // Show the provider's full token rate limit as `tokensUsed` (for display)
+                const tokensLimit = config.rateLimit?.tokensPerMinute ?? config.rateLimit?.requestsPerMinute ?? 0;
                 cachedStats[config.id] = {
-                    ...usage,
+                    // expose tokensUsed as the configured per-minute token limit so dashboards
+                    // Keep requestsUsed as the actual request count (daily requests consumed)
+                    requestsUsed: usage.dailyRequests,
+                    dailyRequests: usage.dailyRequests,
+
                     limits: config.rateLimit
                 };
             }
