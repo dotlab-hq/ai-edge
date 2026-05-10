@@ -6,7 +6,7 @@ import { CONFIG } from '@/utils/schema.lookup';
 import { fetchWithProxy } from '@/utils/proxyFetch';
 import type { Config } from '@/schema';
 
-type OpenAIModelConfig = Config['models']['openai'][0];
+type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 
 export class OpenAIProxy {
     private app: Hono;
@@ -33,7 +33,7 @@ export class OpenAIProxy {
 
     private async handleModels( c: Context ) {
         try {
-            const configs = CONFIG.models.openai;
+            const configs = CONFIG.models.openai ?? [];
             if ( !configs.length ) {
                 console.error( '[/v1/models] No backend configured' );
                 return c.json( { error: 'No backend configured' }, 503 );
@@ -264,7 +264,7 @@ export class OpenAIProxy {
     }
 
     private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
-        return CONFIG.models.openai.filter( config => {
+        return ( CONFIG.models.openai ?? [] ).filter( config => {
             const matchesRequestedModel = config.models.some( m => m === modelName );
             const canRouteWithoutModelMatch = config.randomRouting === true;
 
@@ -559,7 +559,7 @@ export class OpenAIProxy {
         }
 
         if ( Array.isArray( value ) ) {
-            return value.flatMap( item => this.collectTokenStrings( item ) );
+            return value.flatMap<string>( item => this.collectTokenStrings( item ) );
         }
 
         if ( typeof value !== 'object' ) {
@@ -611,7 +611,7 @@ export class OpenAIProxy {
             'reason',
         ] );
 
-        return Object.entries( value ).flatMap( ( [key, nestedValue] ) => {
+        return Object.entries( value ).flatMap<string>( ( [key, nestedValue] ) => {
             if ( ignoredKeys.has( key ) ) {
                 return [];
             }

@@ -3,7 +3,7 @@ import type { JSONable } from "../core/Cache";
 import { CONFIG } from "@/utils/schema.lookup";
 import type { Config } from "@/schema";
 
-type OpenAIModelConfig = Config['models']['openai'][0];
+type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type TransformedModel = Omit<OpenAIModelConfig, 'models'> & { 
     models: Array<{ model: string; rateLimit: OpenAIModelConfig['rateLimit'] }> 
 };
@@ -42,12 +42,12 @@ export class MemoryCache extends Cache {
     }
 
     private transformOpenAIModels(models: OpenAIModelConfig[]): OpenAIModelConfig[] | TransformedModel[] {
-        return models.map(model => {
+        return models.map((model) => {
             if (model.individualLimit) {
                 const { rateLimit: _, ...rest } = model;
                 return {
                     ...rest,
-                    models: model.models.map(m => ({
+                    models: model.models.map((m: string) => ({
                         model: m,
                         rateLimit: model.rateLimit
                     }))

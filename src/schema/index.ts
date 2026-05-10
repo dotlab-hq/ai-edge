@@ -30,6 +30,17 @@ const OpenAIModelSchema = z.object( {
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( false ).describe( 'If true, when this provider is selected it may route to any model the provider advertises at random' ),
 } )
 
+const AnthropicModelSchema = z.object( {
+  id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
+  name: z.string( { error: 'name is required' } ).min( 1, 'name cannot be empty' ),
+  models: z.array( z.string( { error: 'each model must be a string' } ) ).min( 1, 'models array must contain at least one model' ),
+  individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
+  baseUrl: z.url( 'baseUrl must be a valid URL' ),
+  apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
+  rateLimit: RateLimitSchema,
+  randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( false ).describe( 'If true, when this provider is selected it may route to any model the provider advertises at random' ),
+} )
+
 const StateAdapterObjectSchema = z.object( {
   redis_url: z.url( 'redis_url must be a valid URL' ).describe( 'Redis connection URL' ),
 } )
@@ -45,7 +56,8 @@ export const ConfigSchema = z.object( {
   'state-adapter': StateAdapterSchema.describe( 'Storage backend for state management - redis, memory, or { redis_url: string }' ),
   rateLimit: RateLimitSchema.describe( 'Global rate limit applied to all models unless individualLimit is true' ),
   models: z.object( {
-    openai: z.array( OpenAIModelSchema ).min( 1, 'At least one OpenAI config is required' ),
+    openai: z.array( OpenAIModelSchema ).min( 1, 'At least one OpenAI config is required' ).optional().describe( 'OpenAI provider configurations. If omitted, no OpenAI models will be available' ),
+    anthropic: z.array( AnthropicModelSchema ).min( 1, 'At least one Anthropic config is required' ).optional().describe( 'Anthropic provider configurations. If omitted, no Anthropic models will be available' ),
   } ),
 } )
 

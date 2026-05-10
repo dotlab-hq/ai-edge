@@ -64,6 +64,7 @@
       "type": "object",
       "properties": {
         "openai": {
+          "description": "OpenAI provider configurations. If omitted, no OpenAI models will be available",
           "minItems": 1,
           "type": "array",
           "items": {
@@ -160,11 +161,81 @@
             ],
             "additionalProperties": false
           }
+        },
+        "anthropic": {
+          "description": "Anthropic provider configurations. If omitted, no Anthropic models will be available",
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "models": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "individualLimit": {
+                "default": false,
+                "type": "boolean"
+              },
+              "baseUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "apiKey": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rateLimit": {
+                "type": "object",
+                "properties": {
+                  "tokensPerMinute": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requestsPerMinute": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requestsPerDay": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "additionalProperties": false
+              },
+              "randomRouting": {
+                "default": false,
+                "description": "If true, when this provider is selected it may route to any model the provider advertises at random",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "models",
+              "individualLimit",
+              "baseUrl",
+              "apiKey",
+              "randomRouting"
+            ],
+            "additionalProperties": false
+          }
         }
       },
-      "required": [
-        "openai"
-      ],
       "additionalProperties": false
     }
   },

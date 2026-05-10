@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { logger } from 'hono/logger';
 import { CACHE } from "./src/state";
 import { openAIProxy } from "./src/core/OpenAIProxy";
+import { anthropicProxy } from "./src/core/AnthropicProxy";
 import { CONFIG } from "./src/utils/schema.lookup";
 import { rateLimitManager } from "./src/core/RateLimitManager";
 
@@ -14,8 +15,9 @@ let cachedStats: Record<string, any> = {};
 async function loadStats() {
     try {
         cachedStats = {};
+        const openAIConfigs = CONFIG.models.openai ?? [];
 
-        for ( const config of CONFIG.models.openai ) {
+        for ( const config of openAIConfigs ) {
             const providerStats: Record<string, any> = {};
 
             // Collect stats for all models supported by this provider
@@ -74,7 +76,7 @@ app.get( '/clear', async ( c ) => {
         return c.json( { error: 'Confirmation required. Add ?confirm=yes to proceed.' }, 400 )
     }
     await CACHE.clearCache()
-    for ( const config of CONFIG.models.openai ) {
+    for ( const config of CONFIG.models.openai ?? [] ) {
         // Reset stats for each model in this provider
         for ( const modelName of config.models ) {
             await rateLimitManager.reset( config.id, modelName );
@@ -117,5 +119,7 @@ app.get( '/v1/models', async ( c ) => {
 } )
 
 app.route( '/', openAIProxy.getApp() )
+app.route( '/openai', openAIProxy.getApp() )
+app.route( '/anthropic', anthropicProxy.getApp() )
 
 export default app
