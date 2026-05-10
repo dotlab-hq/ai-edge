@@ -6,6 +6,7 @@ import { CONFIG } from '@/utils/schema.lookup';
 import { fetchWithProxy } from '@/utils/proxyFetch';
 import { convertAnthropicRequestToOpenAI, convertOpenAIResponseToAnthropic, streamOpenAIResponseAsAnthropic } from './AnthropicOpenAIBridge';
 import type { Config } from '@/schema';
+import { webSearchManager, type WebSearchResponse } from './WebSearchManager';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 
@@ -67,7 +68,13 @@ export class AnthropicProxy {
     }
 
     private async proxyOpenAICompatibleRequest( c: Context, endpoint: string, redirectDepth: number = 1 ): Promise<any> {
-        const body = await c.req.json().catch( () => ( {} ) );
+        const rawBody = await c.req.json().catch( () => ( {} ) );
+        const webSearchContext = await this.prepareAnthropicWebSearch( rawBody );
+        if ( webSearchContext.errorResponse ) {
+            return c.json( webSearchContext.errorResponse.body, webSearchContext.errorResponse.status as any );
+        }
+
+        const body = webSearchContext.body;
         const requestedModel = body.model;
         let lastFailure: { status: number; payload: any } | null = null;
 
@@ -183,7 +190,8 @@ export class AnthropicProxy {
                         };
 
                     const anthropicResponse = convertOpenAIResponseToAnthropic( normalizedResponse, requestedModel );
-                    return c.json( this.attachUsageIfMissing( endpoint, body, anthropicResponse ), response.status as any );
+                    const responseWithWebSearch = this.attachAnthropicWebSearchMetadata( anthropicResponse, webSearchContext.searchResponse );
+                    return c.json( this.attachUsageIfMissing( endpoint, body, responseWithWebSearch ), response.status as any );
                 } catch ( error: any ) {
                     lastFailure = {
                         status: 502,
@@ -363,6 +371,174 @@ export class AnthropicProxy {
             const canRouteWithoutModelMatch = config.randomRouting === true;
             return matchesRequestedModel || canRouteWithoutModelMatch;
         } );
+    }
+
+    private async prepareAnthropicWebSearch( body: any ): Promise<{
+        body: any;
+        searchResponse?: WebSearchResponse;
+        errorResponse?: { status: number; body: any };
+    }> {
+        if ( !this.shouldUseAnthropicWebSearch( body ) ) {
+            return { body };
+        }
+
+        if ( !webSearchManager.isEnabled() ) {
+            return {
+                body,
+                errorResponse: {
+                    status: 503,
+                    body: {
+                        error: {
+                            message: 'Web search requested but no web search provider is configured',
+                            type: 'invalid_request_error',
+                        }
+                    }
+                }
+            };
+        }
+
+        const query = this.extractAnthropicWebSearchQuery( body );
+        if ( !query ) {
+            return {
+                body,
+                errorResponse: {
+                    status: 400,
+                    body: {
+                        error: {
+                            message: 'Unable to derive a web search query from the Anthropic messages payload',
+                            type: 'invalid_request_error',
+                        }
+                    }
+                }
+            };
+        }
+
+        const searchResponse = await webSearchManager.search( query, {
+            maxResults: 8,
+        } );
+        return {
+            body: this.injectAnthropicWebSearchContext( body, searchResponse ),
+            searchResponse,
+        };
+    }
+
+    private shouldUseAnthropicWebSearch( body: any ): boolean {
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        return tools.some( ( tool: any ) =>
+            tool?.name === 'web_search'
+            || ( typeof tool?.type === 'string' && tool.type.startsWith( 'web_search_' ) )
+            || tool?.type === 'web_search'
+        );
+    }
+
+    private extractAnthropicWebSearchQuery( body: any ): string | null {
+        const messages = Array.isArray( body?.messages ) ? body.messages : [];
+        for ( let index = messages.length - 1; index >= 0; index -= 1 ) {
+            const message = messages[index];
+            if ( message?.role !== 'user' ) continue;
+            const text = this.extractAnthropicTextContent( message?.content );
+            if ( text ) return text;
+        }
+        return null;
+    }
+
+    private injectAnthropicWebSearchContext( body: any, searchResponse: WebSearchResponse ): any {
+        const searchPrompt = this.buildAnthropicWebSearchPrompt( searchResponse );
+        const existingSystem = body?.system;
+        const systemBlocks = typeof existingSystem === 'string'
+            ? [ { type: 'text', text: existingSystem } ]
+            : Array.isArray( existingSystem ) ? existingSystem : [];
+
+        return {
+            ...body,
+            tools: Array.isArray( body?.tools )
+                ? body.tools.filter( ( tool: any ) =>
+                    tool?.name !== 'web_search'
+                    && tool?.type !== 'web_search'
+                    && !( typeof tool?.type === 'string' && tool.type.startsWith( 'web_search_' ) )
+                )
+                : body?.tools,
+            system: [
+                ...systemBlocks,
+                {
+                    type: 'text',
+                    text: searchPrompt,
+                },
+            ],
+        };
+    }
+
+    private buildAnthropicWebSearchPrompt( searchResponse: WebSearchResponse ): string {
+        const citations = searchResponse.citations
+            .map( ( citation, index ) => `[${index + 1}] ${citation.title} - ${citation.url}\n${citation.snippet}` )
+            .join( '\n\n' );
+
+        return [
+            `Web search results for query: ${searchResponse.query}`,
+            'Use these results while answering. Cite supporting sources inline as [1], [2], etc.',
+            citations,
+        ].join( '\n\n' );
+    }
+
+    private attachAnthropicWebSearchMetadata( payload: any, searchResponse?: WebSearchResponse ): any {
+        if ( !searchResponse || !payload || typeof payload !== 'object' || !Array.isArray( payload.content ) ) {
+            return payload;
+        }
+
+        const toolUseId = `toolu_${Date.now().toString( 36 )}`;
+
+        return {
+            ...payload,
+            content: [
+                {
+                    type: 'tool_use',
+                    id: toolUseId,
+                    name: 'web_search',
+                    input: {
+                        query: searchResponse.query,
+                    },
+                },
+                {
+                    type: 'tool_result',
+                    tool_use_id: toolUseId,
+                    content: [
+                        {
+                            type: 'text',
+                            text: this.formatAnthropicWebSearchResult( searchResponse ),
+                        }
+                    ],
+                },
+                ...payload.content,
+            ],
+        };
+    }
+
+    private formatAnthropicWebSearchResult( searchResponse: WebSearchResponse ): string {
+        const sources = searchResponse.citations
+            .map( ( citation, index ) => `[${index + 1}] ${citation.title}\n${citation.url}\n${citation.snippet}` )
+            .join( '\n\n' );
+
+        return [
+            `Provider: ${searchResponse.provider}`,
+            `Query: ${searchResponse.query}`,
+            `Cached: ${searchResponse.cached ? 'yes' : 'no'}`,
+            searchResponse.answerText,
+            sources,
+        ].filter( Boolean ).join( '\n\n' );
+    }
+
+    private extractAnthropicTextContent( content: any ): string {
+        if ( typeof content === 'string' ) {
+            return content.trim();
+        }
+        if ( !Array.isArray( content ) ) {
+            return '';
+        }
+        return content
+            .filter( ( block: any ) => block?.type === 'text' && typeof block?.text === 'string' )
+            .map( ( block: any ) => block.text )
+            .join( ' ' )
+            .trim();
     }
 
     private getOpenAIEndpointForAnthropicEndpoint( endpoint: string ): string {

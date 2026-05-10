@@ -50,11 +50,32 @@ const StateAdapterSchema = z.union( [
   StateAdapterObjectSchema,
 ] )
 
+const WebSearchRateLimitSchema = z.object( {
+  requestsPerMinute: z.number( { error: 'requestsPerMinute must be a number' } ).int( 'requestsPerMinute must be an integer' ).positive( 'requestsPerMinute must be > 0' ).optional(),
+  requestsPerDay: z.number( { error: 'requestsPerDay must be a number' } ).int( 'requestsPerDay must be an integer' ).positive( 'requestsPerDay must be > 0' ).optional(),
+  requestsPerMonth: z.number( { error: 'requestsPerMonth must be a number' } ).int( 'requestsPerMonth must be an integer' ).positive( 'requestsPerMonth must be > 0' ).optional(),
+} ).optional()
+
+const WebSearchToolSchema = z.object( {
+  type: z.enum( ['tavily', 'exa'] ),
+  apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
+  rateLimit: WebSearchRateLimitSchema,
+} )
+
+const WebSearchSchema = z.object( {
+  tools: z.array( WebSearchToolSchema ).min( 1, 'tools.webSearch.tools must contain at least one provider' ),
+} ).optional()
+
+const ToolsSchema = z.object( {
+  webSearch: WebSearchSchema.describe( 'Optional built-in web search providers used to satisfy OpenAI and Anthropic web search tool requests' ),
+} ).optional()
+
 export const ConfigSchema = z.object( {
   proxy: z.url( 'Proxy URL must be a valid URL' ).optional().describe( 'URL of the proxy server to forward requests to' ),
   '$schema': z.url( 'Not a valid $schema URL' ).describe( 'URL to the JSON Schema that this configuration adheres to' ),
   'state-adapter': StateAdapterSchema.describe( 'Storage backend for state management - redis, memory, or { redis_url: string }' ),
   rateLimit: RateLimitSchema.describe( 'Global rate limit applied to all models unless individualLimit is true' ),
+  tools: ToolsSchema.describe( 'Optional built-in proxy tools such as web search' ),
   models: z.object( {
     openai: z.array( OpenAIModelSchema ).min( 1, 'At least one OpenAI config is required' ).optional().describe( 'OpenAI provider configurations. If omitted, no OpenAI models will be available' ),
     anthropic: z.array( AnthropicModelSchema ).min( 1, 'At least one Anthropic config is required' ).optional().describe( 'Anthropic provider configurations. If omitted, no Anthropic models will be available' ),

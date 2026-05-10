@@ -5,6 +5,7 @@ import { rateLimitManager } from './RateLimitManager';
 import { CONFIG } from '@/utils/schema.lookup';
 import { fetchWithProxy } from '@/utils/proxyFetch';
 import type { Config } from '@/schema';
+import { webSearchManager, type WebSearchResponse } from './WebSearchManager';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 
@@ -88,7 +89,13 @@ export class OpenAIProxy {
     }
 
     private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1 ): Promise<any> {
-        const body = await c.req.json().catch( () => ( {} ) );
+        const rawBody = await c.req.json().catch( () => ( {} ) );
+        const webSearchContext = await this.prepareWebSearchForOpenAI( rawBody, endpoint );
+        if ( webSearchContext.errorResponse ) {
+            return c.json( webSearchContext.errorResponse.body, webSearchContext.errorResponse.status as any );
+        }
+
+        const body = webSearchContext.body;
         const modelName = body.model;
         let lastFailure: { status: number; payload: any } | null = null;
 
@@ -208,7 +215,8 @@ export class OpenAIProxy {
                         continue;
                     }
 
-                    return c.json( this.attachUsageIfMissing( endpoint, body, payload ), response.status as any );
+                    const enrichedPayload = this.attachUsageIfMissing( endpoint, body, payload );
+                    return c.json( this.attachWebSearchMetadata( endpoint, enrichedPayload, webSearchContext.searchResponse ), response.status as any );
                 } catch ( error: any ) {
                     lastFailure = {
                         status: 502,
@@ -238,6 +246,174 @@ export class OpenAIProxy {
                 type: 'internal_error'
             }
         }, 502 );
+    }
+
+    private async prepareWebSearchForOpenAI( body: any, endpoint: string ): Promise<{
+        body: any;
+        searchResponse?: WebSearchResponse;
+        errorResponse?: { status: number; body: any };
+    }> {
+        if ( !this.shouldUseOpenAIWebSearch( body ) ) {
+            return { body };
+        }
+
+        if ( !webSearchManager.isEnabled() ) {
+            return {
+                body,
+                errorResponse: {
+                    status: 503,
+                    body: {
+                        error: {
+                            message: 'Web search requested but no web search provider is configured',
+                            type: 'invalid_request_error',
+                        }
+                    }
+                }
+            };
+        }
+
+        const query = this.extractOpenAIWebSearchQuery( body, endpoint );
+        if ( !query ) {
+            return {
+                body,
+                errorResponse: {
+                    status: 400,
+                    body: {
+                        error: {
+                            message: 'Unable to derive a web search query from the request',
+                            type: 'invalid_request_error',
+                        }
+                    }
+                }
+            };
+        }
+
+        const searchResponse = await webSearchManager.search( query, {
+            maxResults: 8,
+        } );
+        return {
+            body: this.injectOpenAIWebSearchContext( body, endpoint, searchResponse ),
+            searchResponse,
+        };
+    }
+
+    private shouldUseOpenAIWebSearch( body: any ): boolean {
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        return tools.some( ( tool: any ) => tool?.type === 'web_search' || tool?.type === 'web_search_preview' );
+    }
+
+    private extractOpenAIWebSearchQuery( body: any, endpoint: string ): string | null {
+        if ( endpoint === 'responses' ) {
+            const values = this.collectTokenStrings( body?.input );
+            return values.join( ' ' ).trim() || null;
+        }
+
+        if ( endpoint === 'chat/completions' ) {
+            const messages = Array.isArray( body?.messages ) ? body.messages : [];
+            for ( let index = messages.length - 1; index >= 0; index -= 1 ) {
+                const message = messages[index];
+                if ( message?.role !== 'user' ) continue;
+                const values = this.collectTokenStrings( message?.content );
+                const text = values.join( ' ' ).trim();
+                if ( text ) return text;
+            }
+        }
+
+        return null;
+    }
+
+    private injectOpenAIWebSearchContext( body: any, endpoint: string, searchResponse: WebSearchResponse ): any {
+        const toolFreeBody = {
+            ...body,
+            tools: Array.isArray( body?.tools )
+                ? body.tools.filter( ( tool: any ) => tool?.type !== 'web_search' && tool?.type !== 'web_search_preview' )
+                : body?.tools,
+        };
+        const searchPrompt = this.buildOpenAIWebSearchPrompt( searchResponse );
+
+        if ( endpoint === 'responses' ) {
+            return {
+                ...toolFreeBody,
+                input: [
+                    ...( Array.isArray( toolFreeBody.input ) ? toolFreeBody.input : [toolFreeBody.input].filter( Boolean ) ),
+                    {
+                        role: 'system',
+                        content: [
+                            {
+                                type: 'input_text',
+                                text: searchPrompt,
+                            }
+                        ],
+                    },
+                ],
+            };
+        }
+
+        if ( endpoint === 'chat/completions' ) {
+            return {
+                ...toolFreeBody,
+                messages: [
+                    {
+                        role: 'system',
+                        content: searchPrompt,
+                    },
+                    ...( Array.isArray( toolFreeBody.messages ) ? toolFreeBody.messages : [] ),
+                ],
+            };
+        }
+
+        return toolFreeBody;
+    }
+
+    private buildOpenAIWebSearchPrompt( searchResponse: WebSearchResponse ): string {
+        const citations = searchResponse.citations
+            .map( ( citation, index ) => `[${index + 1}] ${citation.title} - ${citation.url}\n${citation.snippet}` )
+            .join( '\n\n' );
+
+        return [
+            `Web search results for query: ${searchResponse.query}`,
+            'Use these sources when answering. Cite them inline as [1], [2], etc when relevant.',
+            citations,
+        ].join( '\n\n' );
+    }
+
+    private attachWebSearchMetadata( endpoint: string, payload: any, searchResponse?: WebSearchResponse ): any {
+        if ( !searchResponse || !payload || typeof payload !== 'object' || Array.isArray( payload ) ) {
+            return payload;
+        }
+
+        if ( endpoint === 'responses' ) {
+            const output = Array.isArray( payload.output ) ? payload.output : [];
+            return {
+                ...payload,
+                output: [
+                    {
+                        type: 'web_search_call',
+                        id: `ws_${Date.now().toString( 36 )}`,
+                        status: 'completed',
+                        action: {
+                            type: 'search',
+                            query: searchResponse.query,
+                        },
+                    },
+                    ...output,
+                ],
+                web_search: {
+                    provider: searchResponse.provider,
+                    citations: searchResponse.citations,
+                    cached: searchResponse.cached,
+                },
+            };
+        }
+
+        return {
+            ...payload,
+            web_search: {
+                provider: searchResponse.provider,
+                citations: searchResponse.citations,
+                cached: searchResponse.cached,
+            },
+        };
     }
 
     private isRedirectStatus( status: number ): boolean {
