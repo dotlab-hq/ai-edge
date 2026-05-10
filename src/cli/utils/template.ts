@@ -1,4 +1,5 @@
 import path from 'path';
+import { fetchWithProxy } from '@/utils/proxyFetch';
 
 const GITHUB_API = 'https://api.github.com/repos/dotlab-hq/ai-edge/commits?per_page=1';
 
@@ -9,7 +10,7 @@ interface LatestCommit {
 
 export async function getLatestCommit(): Promise<LatestCommit> {
   try {
-    const response = await fetch( GITHUB_API );
+    const response = await fetchWithProxy( GITHUB_API );
     if ( !response.ok ) throw new Error( 'Failed to fetch latest commit' );
 
     const data = await response.json() as any[];

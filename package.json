@@ -1,6 +1,6 @@
 {
   "name": "ai-edge",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Local LLM routing server with OpenAI compatibility",
   "type": "module",
   "bin": {
@@ -63,6 +63,7 @@
     "hono": "^4.12.16",
     "ioredis": "^5.10.1",
     "json5": "^2.2.3",
+    "undici": "^7.14.0",
     "zod": "^4.4.1"
   }
 }

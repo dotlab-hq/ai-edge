@@ -5,41 +5,50 @@ import { schema } from "@/schema";
 import { MODEL_FILE_PATHS } from "./lookup.files";
 import { readConfig } from "./readConfig";
 
-async function fileExists(filePath: string): Promise<boolean> {
+async function fileExists( filePath: string ): Promise<boolean> {
     try {
-        await access(filePath);
+        await access( filePath );
         return true;
     } catch {
         return false;
     }
 }
 
-const files = await Promise.all(MODEL_FILE_PATHS.map((filePath) => fileExists(filePath)));
+const files = await Promise.all( MODEL_FILE_PATHS.map( ( filePath ) => fileExists( filePath ) ) );
 
-const NoOfFilesFound = files.filter(Boolean).length;
+const NoOfFilesFound = files.filter( Boolean ).length;
 
-if (NoOfFilesFound > 1) {
-    throw new Error(`Multiple model configuration files found. Please ensure only one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join(", ")}`)
+if ( NoOfFilesFound > 1 ) {
+    throw new Error( `Multiple model configuration files found. Please ensure only one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join( ", " )}` )
 }
 
-if (NoOfFilesFound === 0) {
-    throw new Error(`No model configuration file found. Please ensure one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join(", ")}`)
+if ( NoOfFilesFound === 0 ) {
+    throw new Error( `No model configuration file found. Please ensure one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join( ", " )}` )
 }
 
-const fileIndex = files.findIndex(Boolean);
+const fileIndex = files.findIndex( Boolean );
 
 const filePath = MODEL_FILE_PATHS[fileIndex] as string;
 
-const fileContent = await readConfig(filePath);
+const fileContent = await readConfig( filePath );
 
 // const validate the file content against the schema
-const result = schema.safeParse(fileContent);
+const result = schema.safeParse( fileContent );
 
-if (!result.success) {
-    const errorMessages = result.error.issues.map((err) => `- ${err.path.join(".")}: ${err.message}`).join("\n");
-    throw new Error(`Model configuration file validation failed with the following errors:\n${errorMessages}`);
+if ( !result.success ) {
+    const maxErrorsToShow = 10;
+    const errors = result.error.issues;
+    const errorMessages = errors
+        .slice( 0, maxErrorsToShow )
+        .map( ( err ) => `- ${err.path.length > 0 ? err.path.join( "." ) : "(root)"}: ${err.message}` )
+        .join( "\n" );
+
+    const additionalErrorCount = errors.length - maxErrorsToShow;
+    const additionalText = additionalErrorCount > 0 ? `\n... and ${additionalErrorCount} more errors` : '';
+
+    throw new Error( `Model configuration file validation failed with the following errors:\n${errorMessages}${additionalText}` );
 }
 
 const data = result.data;
 
-export { data  as CONFIG};
+export { data as CONFIG };

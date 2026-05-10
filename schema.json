@@ -104,6 +104,11 @@
                   }
                 ]
               },
+              "embeddings": {
+                "default": false,
+                "description": "If true, this provider supports embeddings endpoint",
+                "type": "boolean"
+              },
               "individualLimit": {
                 "default": false,
                 "type": "boolean"
@@ -147,6 +152,7 @@
               "id",
               "name",
               "models",
+              "embeddings",
               "individualLimit",
               "baseUrl",
               "apiKey",

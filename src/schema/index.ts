@@ -15,11 +15,14 @@ const ImageModelsSchema = z.union( [
   } ).strict(),
 ] ).optional().describe( 'If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.' )
 
+const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).default( false ).describe( 'If true, this provider supports embeddings endpoint' )
+
 const OpenAIModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
   name: z.string( { error: 'name is required' } ).min( 1, 'name cannot be empty' ),
   models: z.array( z.string( { error: 'each model must be a string' } ) ).min( 1, 'models array must contain at least one model' ),
   imageModels: ImageModelsSchema,
+  embeddings: EmbeddingsSchema,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),

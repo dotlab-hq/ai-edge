@@ -15,9 +15,10 @@ export class RateLimitManager {
     private readonly locks = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 
     async checkAndConsume(
-        modelId: string,
+        providerId: string,
         tokens: number,
-        rateLimit: RateLimit | undefined
+        rateLimit: RateLimit | undefined,
+        modelName?: string
     ): Promise<{ allowed: boolean; reason?: string }> {
         // No rateLimit object at all => unlimited
         if ( !rateLimit ) {
@@ -33,7 +34,7 @@ export class RateLimitManager {
             return { allowed: true };
         }
 
-        const key = `${this.keyPrefix}${modelId}`;
+        const key = modelName ? `${this.keyPrefix}${providerId}:${modelName}` : `${this.keyPrefix}${providerId}`;
 
         const release = await this.acquireLock( key );
 
@@ -127,8 +128,8 @@ export class RateLimitManager {
         return record;
     }
 
-    async getUsage( modelId: string ): Promise<{ tokensRemaining: number; dailyRequests: number } | null> {
-        const key = `${this.keyPrefix}${modelId}`;
+    async getUsage( providerId: string, modelName?: string ): Promise<{ tokensRemaining: number; dailyRequests: number } | null> {
+        const key = modelName ? `${this.keyPrefix}${providerId}:${modelName}` : `${this.keyPrefix}${providerId}`;
         const record = await CACHE.getKey<BucketRecord>( key );
         return record ? {
             tokensRemaining: Math.ceil( record.tokens ),
@@ -136,8 +137,8 @@ export class RateLimitManager {
         } : null;
     }
 
-    async reset( modelId: string ): Promise<void> {
-        const key = `${this.keyPrefix}${modelId}`;
+    async reset( providerId: string, modelName?: string ): Promise<void> {
+        const key = modelName ? `${this.keyPrefix}${providerId}:${modelName}` : `${this.keyPrefix}${providerId}`;
         await CACHE.setKey( key, this.emptyBucket() );
     }
 

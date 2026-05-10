@@ -16,18 +16,26 @@ async function loadStats() {
         cachedStats = {};
 
         for ( const config of CONFIG.models.openai ) {
-            const usage = await rateLimitManager.getUsage( config.id );
-            if ( usage ) {
-                // Show the provider's full token rate limit as `tokensUsed` (for display)
-                const tokensLimit = config.rateLimit?.tokensPerMinute ?? config.rateLimit?.requestsPerMinute ?? 0;
-                cachedStats[config.id] = {
-                    // expose tokensUsed as the configured per-minute token limit so dashboards
-                    // Keep requestsUsed as the actual request count (daily requests consumed)
-                    requestsUsed: usage.dailyRequests,
-                    dailyRequests: usage.dailyRequests,
+            const providerStats: Record<string, any> = {};
 
-                    limits: config.rateLimit
-                };
+            // Collect stats for all models supported by this provider
+            for ( const modelName of config.models ) {
+                const usage = await rateLimitManager.getUsage( config.id, modelName );
+                if ( usage ) {
+                    const tokensLimit = config.rateLimit?.tokensPerMinute ?? config.rateLimit?.requestsPerMinute ?? 0;
+                    providerStats[modelName] = {
+                        requestsUsed: usage.dailyRequests,
+                        dailyRequests: usage.dailyRequests,
+                        tokensUsed: Math.ceil( tokensLimit - usage.tokensRemaining ),
+                        tokensRemaining: usage.tokensRemaining,
+                        limits: config.rateLimit
+                    };
+                }
+            }
+
+            // Only add provider to stats if it has at least one model with usage
+            if ( Object.keys( providerStats ).length > 0 ) {
+                cachedStats[config.id] = providerStats;
             }
         }
     } catch ( error ) {
@@ -67,7 +75,10 @@ app.get( '/clear', async ( c ) => {
     }
     await CACHE.clearCache()
     for ( const config of CONFIG.models.openai ) {
-        await rateLimitManager.reset( config.id );
+        // Reset stats for each model in this provider
+        for ( const modelName of config.models ) {
+            await rateLimitManager.reset( config.id, modelName );
+        }
     }
     cachedStats = {};
     return c.json( { message: 'Cache and stats cleared successfully' } )

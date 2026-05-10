@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import { stream } from 'hono/streaming';
 import { rateLimitManager } from './RateLimitManager';
 import { CONFIG } from '@/utils/schema.lookup';
+import { fetchWithProxy } from '@/utils/proxyFetch';
 import type { Config } from '@/schema';
 
 type OpenAIModelConfig = Config['models']['openai'][0];
@@ -44,10 +45,9 @@ export class OpenAIProxy {
                 return c.json( { error: 'No backend configured' }, 503 );
             }
 
-            const response = await fetch( this.buildApiUrl( firstConfig, 'models' ), {
+            const response = await fetchWithProxy( this.buildApiUrl( firstConfig, 'models' ), {
                 headers: this.buildHeaders( firstConfig ),
-                ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
-            } as RequestInit );
+            }, CONFIG.proxy );
             const data = await response.json();
             return c.json( data, response.status as any );
         } catch ( error: any ) {
@@ -137,7 +137,8 @@ export class OpenAIProxy {
                 const rateCheck = await rateLimitManager.checkAndConsume(
                     config.id,
                     tokens,
-                    rateLimit
+                    rateLimit,
+                    selectedModel
                 );
 
                 if ( !rateCheck.allowed ) {
@@ -147,12 +148,11 @@ export class OpenAIProxy {
 
                 try {
                     const url = this.buildApiUrl( config, endpoint );
-                    const response = await fetch( url, {
+                    const response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
                         body: JSON.stringify( body ),
-                        ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
-                    } as RequestInit );
+                    }, CONFIG.proxy );
 
                     if ( response.status === 429 ) {
                         continue;
