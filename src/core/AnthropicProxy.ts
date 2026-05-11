@@ -148,7 +148,12 @@ export class AnthropicProxy {
 
                     const contentType = response.headers.get( 'content-type' ) ?? '';
                     if ( openAIRequest.stream === true && response.ok && response.body && contentType.includes( 'text/event-stream' ) ) {
-                        return streamOpenAIResponseAsAnthropic( c, response, requestedModel );
+                        return streamOpenAIResponseAsAnthropic(
+                            c,
+                            response,
+                            requestedModel,
+                            webSearchContext.searchResponse ? this.buildAnthropicWebSearchBlocks( webSearchContext.searchResponse ) : undefined
+                        );
                     }
 
                     const payload = await this.parseResponsePayload( response );
@@ -446,7 +451,7 @@ export class AnthropicProxy {
         const searchPrompt = this.buildAnthropicWebSearchPrompt( searchResponse );
         const existingSystem = body?.system;
         const systemBlocks = typeof existingSystem === 'string'
-            ? [ { type: 'text', text: existingSystem } ]
+            ? [{ type: 'text', text: existingSystem }]
             : Array.isArray( existingSystem ) ? existingSystem : [];
 
         return {
@@ -485,32 +490,57 @@ export class AnthropicProxy {
             return payload;
         }
 
-        const toolUseId = `toolu_${Date.now().toString( 36 )}`;
+        const webSearchBlocks = this.buildAnthropicWebSearchBlocks( searchResponse );
 
         return {
             ...payload,
             content: [
-                {
-                    type: 'tool_use',
-                    id: toolUseId,
-                    name: 'web_search',
-                    input: {
-                        query: searchResponse.query,
-                    },
-                },
-                {
-                    type: 'tool_result',
-                    tool_use_id: toolUseId,
-                    content: [
-                        {
-                            type: 'text',
-                            text: this.formatAnthropicWebSearchResult( searchResponse ),
-                        }
-                    ],
-                },
+                ...webSearchBlocks,
                 ...payload.content,
             ],
+            usage: this.attachAnthropicWebSearchUsage( payload.usage ),
         };
+    }
+
+    private buildAnthropicWebSearchBlocks( searchResponse: WebSearchResponse ): any[] {
+        const toolUseId = `srvtoolu_${Date.now().toString( 36 )}`;
+        const toolResultContent = searchResponse.citations.map( ( citation ) => ( {
+            type: 'web_search_result',
+            url: citation.url,
+            title: citation.title,
+            encrypted_content: this.buildWebSearchEncryptedContent( citation.title, citation.url, citation.snippet ),
+        } ) );
+
+        return [
+            {
+                type: 'server_tool_use',
+                id: toolUseId,
+                name: 'web_search',
+                input: {
+                    query: searchResponse.query,
+                },
+            },
+            {
+                type: 'web_search_tool_result',
+                tool_use_id: toolUseId,
+                content: toolResultContent,
+            },
+        ];
+    }
+
+    private attachAnthropicWebSearchUsage( usage: any ): any {
+        const baseUsage = usage && typeof usage === 'object' ? { ...usage } : {};
+        return {
+            ...baseUsage,
+            server_tool_use: {
+                ...( baseUsage.server_tool_use ?? {} ),
+                web_search_requests: ( baseUsage.server_tool_use?.web_search_requests ?? 0 ) + 1,
+            },
+        };
+    }
+
+    private buildWebSearchEncryptedContent( title: string, url: string, snippet: string ): string {
+        return Buffer.from( JSON.stringify( { title, url, snippet } ) ).toString( 'base64' );
     }
 
     private formatAnthropicWebSearchResult( searchResponse: WebSearchResponse ): string {

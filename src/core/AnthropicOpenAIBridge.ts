@@ -27,6 +27,9 @@ interface StreamState {
     model: string;
     responseModel: string;
     contentBlockIndex: number;
+    initialContentBlocks: Array<Record<string, any>>;
+    initialContentBlocksEmitted: boolean;
+    serverToolUseCount: number;
     currentToolCalls: Map<number, StreamToolCallState>;
     inputTokens: number;
     outputTokens: number;
@@ -58,7 +61,8 @@ export function convertOpenAIResponseToAnthropic(
 export async function streamOpenAIResponseAsAnthropic(
     c: Context,
     response: Response,
-    originalModel: string
+    originalModel: string,
+    initialContentBlocks: Array<Record<string, any>> = []
 ): Promise<Response> {
     c.header( 'Content-Type', 'text/event-stream' );
     c.header( 'Cache-Control', 'no-cache' );
@@ -73,7 +77,7 @@ export async function streamOpenAIResponseAsAnthropic(
         }
 
         const decoder = new TextDecoder();
-        const state = createStreamState( originalModel );
+        const state = createStreamState( originalModel, initialContentBlocks );
         let buffer = '';
 
         try {
@@ -115,12 +119,17 @@ export async function streamOpenAIResponseAsAnthropic(
     } );
 }
 
-function createStreamState( originalModel: string ): StreamState {
+function createStreamState( originalModel: string, initialContentBlocks: Array<Record<string, any>> = [] ): StreamState {
+    const serverToolUseCount = initialContentBlocks.filter( ( block ) => block?.type === 'server_tool_use' ).length;
+
     return {
         messageId: `msg_${Date.now().toString( 36 )}`,
         model: originalModel,
         responseModel: '',
         contentBlockIndex: 0,
+        initialContentBlocks,
+        initialContentBlocksEmitted: false,
+        serverToolUseCount,
         currentToolCalls: new Map(),
         inputTokens: 0,
         outputTokens: 0,
@@ -194,6 +203,7 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
     if ( !state.hasStarted ) {
         await sendMessageStart( state, streamWriter );
         state.hasStarted = true;
+        await emitInitialContentBlocks( state, streamWriter );
     }
 
     const delta = choice.delta;
@@ -277,6 +287,13 @@ async function sendMessageStart( state: StreamState, streamWriter: StreamWriter 
                 input_tokens: state.inputTokens,
                 output_tokens: state.outputTokens,
                 cache_read_input_tokens: state.cachedInputTokens,
+                ...( state.serverToolUseCount > 0
+                    ? {
+                        server_tool_use: {
+                            web_search_requests: state.serverToolUseCount,
+                        },
+                    }
+                    : {} ),
             },
         },
     } );
@@ -303,6 +320,38 @@ async function sendContentBlockStart(
         index,
         content_block: contentBlock,
     } );
+}
+
+async function emitInitialContentBlocks( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
+    if ( state.initialContentBlocksEmitted || !state.initialContentBlocks.length ) {
+        return;
+    }
+
+    for ( const block of state.initialContentBlocks ) {
+        const index = state.contentBlockIndex;
+
+        await sendSseEvent( streamWriter, {
+            type: 'content_block_start',
+            index,
+            content_block: block,
+        } );
+
+        if ( block?.type === 'server_tool_use' && block?.input && typeof block.input === 'object' ) {
+            await sendSseEvent( streamWriter, {
+                type: 'content_block_delta',
+                index,
+                delta: {
+                    type: 'input_json_delta',
+                    partial_json: JSON.stringify( block.input ),
+                },
+            } );
+        }
+
+        await sendContentBlockStop( index, streamWriter );
+        state.contentBlockIndex += 1;
+    }
+
+    state.initialContentBlocksEmitted = true;
 }
 
 async function sendTextDelta( index: number, text: string, streamWriter: StreamWriter ): Promise<void> {
@@ -351,6 +400,13 @@ async function finishStream( state: StreamState, streamWriter: StreamWriter ): P
         usage: {
             output_tokens: state.outputTokens,
             cache_read_input_tokens: state.cachedInputTokens,
+            ...( state.serverToolUseCount > 0
+                ? {
+                    server_tool_use: {
+                        web_search_requests: state.serverToolUseCount,
+                    },
+                }
+                : {} ),
         },
     } );
 
@@ -443,7 +499,7 @@ function normalizeSystemBlocks( system: AnthropicMessageRequest['system'] ): { t
     }
 
     if ( typeof system === 'string' ) {
-        return system.trim() ? [ { type: 'text', text: system } ] : [];
+        return system.trim() ? [{ type: 'text', text: system }] : [];
     }
 
     return system
@@ -495,7 +551,7 @@ function normalizeAnthropicMessage( message: AnthropicMessageRequest['messages']
 
 function extractSystemTextFromMessageContent( content: AnthropicMessageRequest['messages'][number]['content'] ): string[] {
     if ( typeof content === 'string' ) {
-        return content.trim() ? [ content ] : [];
+        return content.trim() ? [content] : [];
     }
 
     return content
@@ -514,22 +570,22 @@ function normalizeAnthropicTools( tools: AnthropicMessageRequest['tools'] ): Ant
         }
 
         if ( typeof tool.name === 'string' && tool.name.trim().length > 0 && isPlainObject( tool.input_schema ) ) {
-            return [ {
+            return [{
                 name: tool.name,
                 description: typeof tool.description === 'string' ? tool.description : tool.name,
                 input_schema: normalizeJsonSchemaObject( tool.input_schema ),
-            } ];
+            }];
         }
 
         if ( typeof tool.type === 'string' && tool.type.trim().length > 0 ) {
             const toolName = tool.type.replace( /[^a-zA-Z0-9_-]/g, '_' );
-            return [ {
+            return [{
                 name: toolName,
                 description: typeof tool.description === 'string' && tool.description.trim().length > 0
                     ? tool.description
                     : `Anthropic server tool: ${tool.type}`,
                 input_schema: normalizeJsonSchemaObject( isPlainObject( tool.input_schema ) ? tool.input_schema : { type: 'object', properties: {} } ),
-            } ];
+            }];
         }
 
         return [];
