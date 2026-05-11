@@ -39,6 +39,8 @@ interface StreamState {
     textBlockOpen: boolean;
     lastFinishReason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null;
     finished: boolean;
+    sentEventHashes?: Set<string>;
+    sentToolUseIds?: Set<string>;
 }
 
 let toolIdCounter = 0;
@@ -139,6 +141,8 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         textBlockOpen: false,
         lastFinishReason: null,
         finished: false,
+        sentEventHashes: new Set(),
+        sentToolUseIds: new Set(),
     };
 }
 
@@ -209,12 +213,12 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
     const delta = choice.delta;
     if ( delta.content ) {
         if ( !state.textBlockOpen ) {
-            await sendContentBlockStart( state.contentBlockIndex, 'text', '', streamWriter );
+            await sendContentBlockStart( state, state.contentBlockIndex, 'text', '', streamWriter );
             state.textBlockOpen = true;
         }
 
         state.textContent += delta.content;
-        await sendTextDelta( state.contentBlockIndex, delta.content, streamWriter );
+        await sendTextDelta( state, state.contentBlockIndex, delta.content, streamWriter );
     }
 
     if ( delta.tool_calls ) {
@@ -227,14 +231,14 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
         state.lastFinishReason = choice.finish_reason;
 
         if ( state.textBlockOpen ) {
-            await sendContentBlockStop( state.contentBlockIndex, streamWriter );
+            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
             state.textBlockOpen = false;
             state.textContent = '';
             state.contentBlockIndex++;
         }
 
         for ( const toolCall of state.currentToolCalls.values() ) {
-            await sendContentBlockStop( toolCall.blockIndex, streamWriter );
+            await sendContentBlockStop( state, toolCall.blockIndex, streamWriter );
         }
     }
 }
@@ -245,21 +249,35 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
 
     if ( !currentCall ) {
         if ( state.textBlockOpen ) {
-            await sendContentBlockStop( state.contentBlockIndex, streamWriter );
+            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
             state.textBlockOpen = false;
             state.textContent = '';
             state.contentBlockIndex++;
         }
 
-        const toolId = toolCall.id || generateUniqueToolId();
-        currentCall = {
-            id: toolId,
-            name: toolCall.function?.name || '',
-            arguments: '',
-            blockIndex: state.contentBlockIndex + index,
-        };
-        state.currentToolCalls.set( index, currentCall );
-        await sendContentBlockStart( currentCall.blockIndex, 'tool_use', currentCall.name, streamWriter, currentCall.id );
+        // If the upstream already emitted a tool_use with this id, try to reuse it
+        const incomingId = toolCall.id;
+        if ( incomingId && state.sentToolUseIds && state.sentToolUseIds.has( incomingId ) ) {
+            const existing = Array.from( state.currentToolCalls.values() ).find( ( c ) => c.id === incomingId );
+            if ( existing ) {
+                currentCall = existing;
+            }
+        }
+
+        if ( !currentCall ) {
+            const toolId = toolCall.id || generateUniqueToolId();
+            currentCall = {
+                id: toolId,
+                name: toolCall.function?.name || '',
+                arguments: '',
+                blockIndex: state.contentBlockIndex + index,
+            };
+            state.currentToolCalls.set( index, currentCall );
+            // Only send a start event if we haven't already emitted this tool id
+            if ( !incomingId || !( state.sentToolUseIds && state.sentToolUseIds.has( incomingId ) ) ) {
+                await sendContentBlockStart( state, currentCall.blockIndex, 'tool_use', currentCall.name, streamWriter, currentCall.id );
+            }
+        }
     }
 
     if ( toolCall.function?.name ) {
@@ -268,12 +286,12 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
 
     if ( toolCall.function?.arguments ) {
         currentCall.arguments += toolCall.function.arguments;
-        await sendInputJsonDelta( currentCall.blockIndex, toolCall.function.arguments, streamWriter );
+        await sendInputJsonDelta( state, currentCall.blockIndex, toolCall.function.arguments, streamWriter );
     }
 }
 
 async function sendMessageStart( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( streamWriter, {
+    await sendSseEvent( state, streamWriter, {
         type: 'message_start',
         message: {
             id: state.messageId,
@@ -300,6 +318,7 @@ async function sendMessageStart( state: StreamState, streamWriter: StreamWriter 
 }
 
 async function sendContentBlockStart(
+    state: StreamState | undefined,
     index: number,
     type: 'text' | 'tool_use',
     textOrName: string,
@@ -315,7 +334,7 @@ async function sendContentBlockStart(
             input: {},
         };
 
-    await sendSseEvent( streamWriter, {
+    await sendSseEvent( state, streamWriter, {
         type: 'content_block_start',
         index,
         content_block: contentBlock,
@@ -330,14 +349,14 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
     for ( const block of state.initialContentBlocks ) {
         const index = state.contentBlockIndex;
 
-        await sendSseEvent( streamWriter, {
+        await sendSseEvent( state, streamWriter, {
             type: 'content_block_start',
             index,
             content_block: block,
         } );
 
         if ( block?.type === 'server_tool_use' && block?.input && typeof block.input === 'object' ) {
-            await sendSseEvent( streamWriter, {
+            await sendSseEvent( state, streamWriter, {
                 type: 'content_block_delta',
                 index,
                 delta: {
@@ -347,15 +366,15 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
             } );
         }
 
-        await sendContentBlockStop( index, streamWriter );
+        await sendContentBlockStop( state, index, streamWriter );
         state.contentBlockIndex += 1;
     }
 
     state.initialContentBlocksEmitted = true;
 }
 
-async function sendTextDelta( index: number, text: string, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( streamWriter, {
+async function sendTextDelta( state: StreamState | undefined, index: number, text: string, streamWriter: StreamWriter ): Promise<void> {
+    await sendSseEvent( state, streamWriter, {
         type: 'content_block_delta',
         index,
         delta: {
@@ -365,8 +384,8 @@ async function sendTextDelta( index: number, text: string, streamWriter: StreamW
     } );
 }
 
-async function sendInputJsonDelta( index: number, partialJson: string, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( streamWriter, {
+async function sendInputJsonDelta( state: StreamState | undefined, index: number, partialJson: string, streamWriter: StreamWriter ): Promise<void> {
+    await sendSseEvent( state, streamWriter, {
         type: 'content_block_delta',
         index,
         delta: {
@@ -376,8 +395,8 @@ async function sendInputJsonDelta( index: number, partialJson: string, streamWri
     } );
 }
 
-async function sendContentBlockStop( index: number, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( streamWriter, {
+async function sendContentBlockStop( state: StreamState | undefined, index: number, streamWriter: StreamWriter ): Promise<void> {
+    await sendSseEvent( state, streamWriter, {
         type: 'content_block_stop',
         index,
     } );
@@ -391,7 +410,7 @@ async function finishStream( state: StreamState, streamWriter: StreamWriter ): P
     state.finished = true;
 
     const stopReason = mapStopReason( state.lastFinishReason );
-    await sendSseEvent( streamWriter, {
+    await sendSseEvent( state, streamWriter, {
         type: 'message_delta',
         delta: {
             stop_reason: stopReason,
@@ -410,11 +429,11 @@ async function finishStream( state: StreamState, streamWriter: StreamWriter ): P
         },
     } );
 
-    await sendSseEvent( streamWriter, { type: 'message_stop' } );
+    await sendSseEvent( state, streamWriter, { type: 'message_stop' } );
 }
 
 async function sendErrorEvent( streamWriter: StreamWriter, error: Error, originalModel: string ): Promise<void> {
-    await sendSseEvent( streamWriter, {
+    await sendSseEvent( undefined, streamWriter, {
         type: 'error',
         error: {
             type: 'api_error',
@@ -422,14 +441,35 @@ async function sendErrorEvent( streamWriter: StreamWriter, error: Error, origina
         },
     } );
 
-    await sendSseEvent( streamWriter, {
+    await sendSseEvent( undefined, streamWriter, {
         type: 'message_stop',
     } );
 }
 
-async function sendSseEvent( streamWriter: StreamWriter, data: Record<string, any> ): Promise<void> {
-    const payload = `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n`;
-    await streamWriter.write( payload );
+async function sendSseEvent( state: StreamState | undefined, streamWriter: StreamWriter, data: Record<string, any> ): Promise<void> {
+    try {
+        if ( state ) {
+            try {
+                const key = JSON.stringify( data );
+                if ( state.sentEventHashes && state.sentEventHashes.has( key ) ) {
+                    return;
+                }
+                state.sentEventHashes?.add( key );
+
+                // track tool_use ids to prevent duplicate tool_use/tool_result pairing
+                if ( data?.type === 'content_block_start' && data?.content_block?.type === 'tool_use' && data?.content_block?.id ) {
+                    state.sentToolUseIds?.add( data.content_block.id );
+                }
+            } catch ( _ ) {
+                // ignore hashing errors and continue to send event
+            }
+        }
+
+        const payload = `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n`;
+        await streamWriter.write( payload );
+    } catch ( err ) {
+        // swallowing write errors here will let upper layers handle stream lifecycle
+    }
 }
 
 function mapStopReason( reason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null ): AnthropicMessageResponse['stop_reason'] {
