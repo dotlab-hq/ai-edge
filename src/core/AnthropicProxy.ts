@@ -372,7 +372,7 @@ export class AnthropicProxy {
 
     private getBackendsForModel( modelName: string ): OpenAIModelConfig[] {
         return ( CONFIG.models.openai || [] ).filter( config => {
-            const matchesRequestedModel = config.models.some( m => m === modelName );
+            const matchesRequestedModel = config.models.some( m => ( typeof m === 'string' ? m === modelName : ( m as any ).model === modelName ) );
             const canRouteWithoutModelMatch = config.randomRouting === true;
             return matchesRequestedModel || canRouteWithoutModelMatch;
         } );
@@ -625,7 +625,8 @@ export class AnthropicProxy {
             return [requestedModel];
         }
 
-        const uniqueModels: string[] = Array.from( new Set( config.models ) );
+        const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+        const uniqueModels: string[] = Array.from( new Set( modelNames ) );
         if ( !uniqueModels.length ) {
             return [requestedModel];
         }

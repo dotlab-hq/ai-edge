@@ -441,7 +441,7 @@ export class OpenAIProxy {
 
     private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
         return ( CONFIG.models.openai ?? [] ).filter( config => {
-            const matchesRequestedModel = config.models.some( m => m === modelName );
+            const matchesRequestedModel = config.models.some( m => ( typeof m === 'string' ? m === modelName : ( m as any ).model === modelName ) );
             const canRouteWithoutModelMatch = config.randomRouting === true;
 
             // For image endpoints, filter by capability and allow random routing
@@ -535,7 +535,8 @@ export class OpenAIProxy {
             return [requestedModel];
         }
 
-        const uniqueModels = Array.from( new Set( config.models ) );
+        const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+        const uniqueModels = Array.from( new Set( modelNames ) );
         if ( !uniqueModels.length ) {
             return [requestedModel];
         }

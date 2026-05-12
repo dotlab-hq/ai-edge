@@ -21,7 +21,8 @@ async function loadStats() {
             const providerStats: Record<string, any> = {};
 
             // Collect stats for all models supported by this provider
-            for ( const modelName of config.models ) {
+            for ( const modelEntry of config.models ) {
+                const modelName = typeof modelEntry === 'string' ? modelEntry : ( modelEntry as any ).model
                 const usage = await rateLimitManager.getUsage( config.id, modelName );
                 if ( usage ) {
                     const tokensLimit = config.rateLimit?.tokensPerMinute ?? config.rateLimit?.requestsPerMinute ?? 0;
@@ -78,7 +79,8 @@ app.get( '/clear', async ( c ) => {
     await CACHE.clearCache()
     for ( const config of CONFIG.models.openai ?? [] ) {
         // Reset stats for each model in this provider
-        for ( const modelName of config.models ) {
+        for ( const modelEntry of config.models ) {
+            const modelName = typeof modelEntry === 'string' ? modelEntry : ( modelEntry as any ).model
             await rateLimitManager.reset( config.id, modelName );
         }
     }
@@ -96,9 +98,10 @@ app.get( '/v1/models', async ( c ) => {
         if ( CONFIG.models?.openai ) {
             for ( const cfg of CONFIG.models.openai ) {
                 const providerName = cfg.id || cfg.name || 'provider'
-                for ( const m of cfg.models ) {
-                    if ( !modelsByName[m] ) modelsByName[m] = { providers: [] }
-                    if ( !modelsByName[m].providers.includes( providerName ) ) modelsByName[m].providers.push( providerName )
+                for ( const mEntry of cfg.models ) {
+                    const modelName = typeof mEntry === 'string' ? mEntry : ( mEntry as any ).model
+                    if ( !modelsByName[modelName] ) modelsByName[modelName] = { providers: [] }
+                    if ( !modelsByName[modelName].providers.includes( providerName ) ) modelsByName[modelName].providers.push( providerName )
                 }
             }
         }
