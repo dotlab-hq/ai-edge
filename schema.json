@@ -145,7 +145,46 @@
                 "minItems": 1,
                 "type": "array",
                 "items": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "rateLimit": {
+                          "type": "object",
+                          "properties": {
+                            "tokensPerMinute": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "requestsPerMinute": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "requestsPerDay": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "model",
+                        "rateLimit"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
                 }
               },
               "imageModels": {
@@ -244,7 +283,46 @@
                 "minItems": 1,
                 "type": "array",
                 "items": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "rateLimit": {
+                          "type": "object",
+                          "properties": {
+                            "tokensPerMinute": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "requestsPerMinute": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "requestsPerDay": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "model",
+                        "rateLimit"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
                 }
               },
               "individualLimit": {

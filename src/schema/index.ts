@@ -1,11 +1,13 @@
 import { z } from '@hono/zod-openapi'
 
-const RateLimitSchema = z.object( {
+const RateLimitSpec = z.object( {
   // If any of these fields are omitted the system will treat that dimension as "unlimited".
   tokensPerMinute: z.number( { error: 'tokensPerMinute must be a number' } ).int( 'tokensPerMinute must be an integer' ).positive( 'tokensPerMinute must be > 0' ).optional(),
   requestsPerMinute: z.number( { error: 'requestsPerMinute must be a number' } ).int( 'requestsPerMinute must be an integer' ).positive( 'requestsPerMinute must be > 0' ).optional(),
   requestsPerDay: z.number( { error: 'requestsPerDay must be a number' } ).int( 'requestsPerDay must be an integer' ).positive( 'requestsPerDay must be > 0' ).optional(),
-} ).optional()
+} ).strict()
+
+const RateLimitSchema = RateLimitSpec.optional()
 
 const ImageModelsSchema = z.union( [
   z.boolean( { error: 'imageModels must be a boolean' } ),
@@ -17,10 +19,15 @@ const ImageModelsSchema = z.union( [
 
 const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).default( false ).describe( 'If true, this provider supports embeddings endpoint' )
 
+const ModelWithRateLimitSchema = z.object( {
+  model: z.string( { error: 'model is required' } ).min( 1, 'model cannot be empty' ),
+  rateLimit: RateLimitSpec,
+} ).strict()
+
 const OpenAIModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
   name: z.string( { error: 'name is required' } ).min( 1, 'name cannot be empty' ),
-  models: z.array( z.string( { error: 'each model must be a string' } ) ).min( 1, 'models array must contain at least one model' ),
+  models: z.array( z.union( [z.string( { error: 'each model must be a string' } ), ModelWithRateLimitSchema] ) ).min( 1, 'models array must contain at least one model' ),
   imageModels: ImageModelsSchema,
   embeddings: EmbeddingsSchema,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
@@ -30,16 +37,50 @@ const OpenAIModelSchema = z.object( {
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( false ).describe( 'If true, when this provider is selected it may route to any model the provider advertises at random' ),
 } )
 
+  .superRefine( ( val, ctx ) => {
+    const models = val.models || []
+    const hasObject = models.some( m => typeof m === 'object' )
+    const hasString = models.some( m => typeof m === 'string' )
+    if ( hasObject && hasString ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'models must be all strings or all objects with { model, rateLimit }' } )
+    }
+    if ( hasObject ) {
+      if ( val.rateLimit ) {
+        ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'backend-level rateLimit is forbidden when using per-model rate limits' } )
+      }
+      if ( val.individualLimit === false ) {
+        ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'individualLimit cannot be false when using per-model rate limits' } )
+      }
+    }
+  } )
+
 const AnthropicModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
   name: z.string( { error: 'name is required' } ).min( 1, 'name cannot be empty' ),
-  models: z.array( z.string( { error: 'each model must be a string' } ) ).min( 1, 'models array must contain at least one model' ),
+  models: z.array( z.union( [z.string( { error: 'each model must be a string' } ), ModelWithRateLimitSchema] ) ).min( 1, 'models array must contain at least one model' ),
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( false ).describe( 'If true, when this provider is selected it may route to any model the provider advertises at random' ),
 } )
+
+  .superRefine( ( val, ctx ) => {
+    const models = val.models || []
+    const hasObject = models.some( m => typeof m === 'object' )
+    const hasString = models.some( m => typeof m === 'string' )
+    if ( hasObject && hasString ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'models must be all strings or all objects with { model, rateLimit }' } )
+    }
+    if ( hasObject ) {
+      if ( val.rateLimit ) {
+        ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'backend-level rateLimit is forbidden when using per-model rate limits' } )
+      }
+      if ( val.individualLimit === false ) {
+        ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'individualLimit cannot be false when using per-model rate limits' } )
+      }
+    }
+  } )
 
 const StateAdapterObjectSchema = z.object( {
   redis_url: z.url( 'redis_url must be a valid URL' ).describe( 'Redis connection URL' ),
