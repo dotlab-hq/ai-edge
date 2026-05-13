@@ -582,15 +582,11 @@ export class OpenAIProxy {
 
     private buildApiUrl( config: OpenAIModelConfig, endpoint: string ): string {
         const baseUrl = this.normalizeBaseUrl( config.baseUrl );
-        return `${baseUrl}/v1/${endpoint}`;
+        return `${baseUrl}/${endpoint}`;
     }
 
     private normalizeBaseUrl( baseUrl: string ): string {
-        const trimmed = baseUrl.replace( /\/+$/, '' );
-        if ( trimmed.endsWith( '/v1' ) ) {
-            return trimmed.slice( 0, -3 );
-        }
-        return trimmed;
+        return baseUrl.replace( /\/+$/, '' );
     }
 
     private calculateTokenCount( body: any ): number {

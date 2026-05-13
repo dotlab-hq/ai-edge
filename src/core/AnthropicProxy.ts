@@ -43,7 +43,7 @@ export class AnthropicProxy {
                 return c.json( { error: 'No backend configured' }, 503 );
             }
 
-            const response = await fetchWithProxy( `${this.normalizeBaseUrl( firstConfig.baseUrl )}/v1/models`, {
+            const response = await fetchWithProxy( `${this.normalizeBaseUrl( firstConfig.baseUrl )}/models`, {
                 headers: this.buildHeaders( firstConfig ),
             }, CONFIG.proxy );
             const data = await response.json();
@@ -135,7 +135,7 @@ export class AnthropicProxy {
                 try {
                     const openAIRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
                     const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
-                    const url = `${this.normalizeBaseUrl( config.baseUrl )}/v1/${upstreamEndpoint}`;
+                    const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
                     const response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
@@ -288,7 +288,7 @@ export class AnthropicProxy {
                 }
 
                 try {
-                    const url = `${this.normalizeBaseUrl( config.baseUrl )}/v1/${endpoint}`;
+                    const url = `${this.normalizeBaseUrl( config.baseUrl )}/${endpoint}`;
                     const response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
@@ -678,11 +678,7 @@ export class AnthropicProxy {
     }
 
     private normalizeBaseUrl( baseUrl: string ): string {
-        const trimmed = baseUrl.replace( /\/+$/, '' );
-        if ( trimmed.endsWith( '/v1' ) ) {
-            return trimmed.slice( 0, -3 );
-        }
-        return trimmed;
+        return baseUrl.replace( /\/+$/, '' );
     }
 
     private calculateTokenCount( body: any ): number {
