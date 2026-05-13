@@ -13,6 +13,7 @@ npx ai-edge init
 ```
 
 Or skip prompts for automation:
+
 ```bash
 npx ai-edge init --skip-prompts
 ```
@@ -37,11 +38,11 @@ Edit the generated `model.jsonc` and add your LLM providers:
         "rateLimit": {
           "tokensPerMinute": 90000,
           "requestsPerMinute": 3500,
-          "requestsPerDay": 200000
-        }
-      }
-    ]
-  }
+          "requestsPerDay": 200000,
+        },
+      },
+    ],
+  },
 }
 ```
 
@@ -76,6 +77,7 @@ npx ai-edge serve --skip-prompts
 ```
 
 **What it does:**
+
 - Loads configuration from `model.jsonc`
 - Starts on port 25789 (auto-selects next available if busy)
 - Shows server configuration details
@@ -90,6 +92,7 @@ npx ai-edge serve --skip-prompts
 ### JSONC (JSON with Comments)
 
 The configuration uses **JSONC** format for better user experience:
+
 - ✅ Comments preserved for documentation
 - ✅ Inline field explanations
 - ✅ Example values shown
@@ -104,6 +107,7 @@ The generated schema reference always points to the latest version:
 ```
 
 When installed as an NPM package and linked locally, it references:
+
 ```jsonc
 "$schema": "./node_modules/ai-edge/schema.json"
 ```
@@ -130,10 +134,30 @@ Each backend configuration includes:
   "rateLimit": {
     "tokensPerMinute": 90000,
     "requestsPerMinute": 3500,
-    "requestsPerDay": 200000
-  }
+    "requestsPerDay": 200000,
+  },
 }
 ```
+
+## Code Interpreter (Daytona)
+
+Configure a Daytona sandbox to handle OpenAI `code_interpreter` and Anthropic `code_execution` tool requests:
+
+```jsonc
+{
+  "tools": {
+    "codeInterpreter": {
+      "type": "daytona",
+      "apiKey": "${DAYTONA_API_KEY}",
+      "language": "python",
+      "timeout": 300,
+      "target": "us",
+    },
+  },
+}
+```
+
+`code_interpreter` is accepted as an alias for `codeInterpreter`.
 
 ## API Endpoints
 
@@ -197,6 +221,7 @@ bun link
 ```
 
 Register locally for use in other projects:
+
 ```bash
 bun link ai-edge
 ```
@@ -220,7 +245,7 @@ Creates `dist/cli.js` (standalone CLI executable).
 ✅ **Dynamic Templates** - Always uses latest schema from GitHub  
 ✅ **JSONC Configuration** - Comments for better documentation  
 ✅ **Bun Linked** - Local package development support  
-✅ **TypeScript** - Full type safety  
+✅ **TypeScript** - Full type safety
 
 ## Error Handling
 
@@ -263,17 +288,17 @@ Use `${VAR_NAME}` in your `model.jsonc` to reference environment variables:
       {
         "apiKey": "${OPENAI_API_KEY}",
         "baseUrl": "https://api.openai.com/v1",
-        "models": ["gpt-3.5-turbo"]
-      }
-    ]
-  }
+        "models": ["gpt-3.5-turbo"],
+      },
+    ],
+  },
 }
 ```
 
 ## Architecture
 
 - **Hono** - Fast, lightweight HTTP server
-- **Zod** - Type-safe configuration validation  
+- **Zod** - Type-safe configuration validation
 - **@clack/prompts** - Beautiful interactive CLI
 - **Bun** - Fast JavaScript runtime
 - **Multi-backend** - Load balancing across providers

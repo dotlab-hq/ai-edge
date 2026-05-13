@@ -7,6 +7,14 @@ import { fetchWithProxy } from '@/utils/proxyFetch';
 import { convertAnthropicRequestToOpenAI, convertOpenAIResponseToAnthropic, streamOpenAIResponseAsAnthropic } from './AnthropicOpenAIBridge';
 import type { Config } from '@/schema';
 import { webSearchManager, type WebSearchResponse } from './WebSearchManager';
+import { codeInterpreterManager } from './CodeInterpreterManager';
+import {
+    buildCodeInterpreterToolDefinition,
+    normalizeToolChoice,
+    runCodeInterpreterToolLoop,
+    stripCodeInterpreterTools,
+    isCodeInterpreterTool,
+} from './codeInterpreterFlow';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 
@@ -85,6 +93,10 @@ export class AnthropicProxy {
                     type: 'invalid_request_error'
                 }
             }, 400 );
+        }
+
+        if ( this.shouldUseAnthropicCodeInterpreter( body ) ) {
+            return this.proxyAnthropicCodeInterpreterRequest( c, body, requestedModel, webSearchContext.searchResponse );
         }
 
         const maxRedirects = 5;
@@ -500,6 +512,202 @@ export class AnthropicProxy {
             ],
             usage: this.attachAnthropicWebSearchUsage( payload.usage ),
         };
+    }
+
+    private shouldUseAnthropicCodeInterpreter( body: any ): boolean {
+        if ( !codeInterpreterManager.isEnabled() ) {
+            return false;
+        }
+
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        return tools.some( ( tool: any ) => this.isAnthropicCodeInterpreterTool( tool ) );
+    }
+
+    private isAnthropicCodeInterpreterTool( tool: any ): boolean {
+        if ( isCodeInterpreterTool( tool ) ) {
+            return true;
+        }
+
+        const type = typeof tool?.type === 'string' ? tool.type : '';
+        if ( type.startsWith( 'code_execution' ) ) {
+            return true;
+        }
+
+        return tool?.name === 'code_execution';
+    }
+
+    private async proxyAnthropicCodeInterpreterRequest(
+        c: Context,
+        body: any,
+        requestedModel: string,
+        searchResponse?: WebSearchResponse
+    ): Promise<any> {
+        if ( body.stream === true ) {
+            return c.json( {
+                error: {
+                    message: 'code_execution does not currently support streaming responses',
+                    type: 'invalid_request_error'
+                }
+            }, 400 );
+        }
+
+        const matchingBackends = this.getBackendsForModel( requestedModel );
+        if ( !matchingBackends.length ) {
+            console.error( `[messages] No OpenAI backends found for model: ${requestedModel}` );
+            return c.json( {
+                error: {
+                    message: `Model not found: ${requestedModel}`,
+                    type: 'invalid_request_error'
+                }
+            }, 400 );
+        }
+
+        const backends = this.getRoundRobinBackends( requestedModel, matchingBackends );
+        const backendIds = backends.map( b => b.id ).join( ', ' );
+        console.error( `[messages] Attempting code interpreter backends for model ${requestedModel}: ${backendIds}` );
+
+        let lastFailure: { status: number; payload: any } | null = null;
+
+        for ( const config of backends ) {
+            const candidateModels = this.getCandidateModelsForProvider( config, requestedModel );
+
+            for ( const selectedModel of candidateModels ) {
+                try {
+                    const filteredBody = this.stripAnthropicCodeInterpreterTools( body );
+                    const openAIRequest = convertAnthropicRequestToOpenAI( filteredBody, selectedModel, 'native' );
+                    const { tools } = stripCodeInterpreterTools( openAIRequest.tools );
+                    const toolDefinition = buildCodeInterpreterToolDefinition();
+                    const toolChoice = normalizeToolChoice( openAIRequest.tool_choice ?? filteredBody.tool_choice );
+                    const rateLimit = this.getEffectiveRateLimit( config );
+                    const sessionId = this.buildCodeInterpreterSessionId();
+
+                    const callModel = async ( request: any ) => {
+                        const url = `${this.normalizeBaseUrl( config.baseUrl )}/chat/completions`;
+                        const response = await fetchWithProxy( url, {
+                            method: 'POST',
+                            headers: this.buildHeaders( config ),
+                            body: JSON.stringify( request ),
+                        }, CONFIG.proxy );
+                        const payload = await this.parseResponsePayload( response );
+
+                        if ( !response.ok ) {
+                            const error = new Error( `Upstream request failed with ${response.status}` );
+                            ( error as any ).status = response.status;
+                            ( error as any ).payload = payload;
+                            throw error;
+                        }
+
+                        return { response, payload };
+                    };
+
+                    const onBeforeRequest = async ( request: any ) => {
+                        const tokens = this.calculateTokenCount( request );
+                        const rateCheck = await rateLimitManager.checkAndConsume(
+                            config.id,
+                            tokens,
+                            rateLimit,
+                            selectedModel
+                        );
+
+                        if ( !rateCheck.allowed ) {
+                            const error = new Error( 'Rate limit exceeded' );
+                            ( error as any ).rateLimitExceeded = true;
+                            throw error;
+                        }
+                    };
+
+                    const { payload } = await runCodeInterpreterToolLoop( {
+                        request: {
+                            ...openAIRequest,
+                            tools,
+                            stream: false,
+                        },
+                        toolDefinition,
+                        toolChoice,
+                        callModel,
+                        onBeforeRequest,
+                        executeCode: async ( code, toolSessionId ) => codeInterpreterManager.executePython( code, toolSessionId ),
+                        sessionId,
+                    } );
+
+                    if ( !payload || typeof payload !== 'object' || Array.isArray( payload ) ) {
+                        lastFailure = {
+                            status: 502,
+                            payload: {
+                                error: {
+                                    message: 'Upstream returned invalid OpenAI response',
+                                    type: 'upstream_error'
+                                }
+                            }
+                        };
+                        continue;
+                    }
+
+                    const responsePayload = payload as any;
+                    const promptTokens = this.calculateTokenCount( body );
+                    const completionTokens = this.countTokensFromContent( responsePayload?.choices?.[0]?.message?.content ?? '' );
+                    const normalizedResponse = responsePayload.usage
+                        ? responsePayload
+                        : {
+                            ...responsePayload,
+                            usage: {
+                                prompt_tokens: promptTokens,
+                                completion_tokens: completionTokens,
+                                total_tokens: promptTokens + completionTokens,
+                            },
+                        };
+
+                    const anthropicResponse = convertOpenAIResponseToAnthropic( normalizedResponse, requestedModel );
+                    const responseWithWebSearch = this.attachAnthropicWebSearchMetadata( anthropicResponse, searchResponse );
+                    return c.json( this.attachUsageIfMissing( 'messages', body, responseWithWebSearch ), 200 );
+                } catch ( error: any ) {
+                    if ( error?.rateLimitExceeded ) {
+                        continue;
+                    }
+
+                    lastFailure = {
+                        status: error?.status ?? 502,
+                        payload: error?.payload ?? {
+                            error: {
+                                message: error?.message || 'Upstream request failed',
+                                type: 'upstream_error'
+                            }
+                        }
+                    };
+                    console.error( `[messages] Code interpreter error from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
+                    continue;
+                }
+            }
+        }
+
+        if ( lastFailure ) {
+            const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
+            console.error( `\n❌ [messages] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+            return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
+        }
+
+        console.error( `\n❌ [messages] ALL OPENAI PROVIDERS FAILED - No response from any backend\nModel: ${requestedModel}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+        return c.json( {
+            error: {
+                message: 'All providers failed',
+                type: 'internal_error'
+            }
+        }, 502 );
+    }
+
+    private stripAnthropicCodeInterpreterTools( body: any ): any {
+        if ( !Array.isArray( body?.tools ) ) {
+            return body;
+        }
+
+        return {
+            ...body,
+            tools: body.tools.filter( ( tool: any ) => !this.isAnthropicCodeInterpreterTool( tool ) ),
+        };
+    }
+
+    private buildCodeInterpreterSessionId(): string {
+        return `ci_${Date.now().toString( 36 )}_${Math.random().toString( 36 ).slice( 2, 8 )}`;
     }
 
     private buildAnthropicWebSearchBlocks( searchResponse: WebSearchResponse ): any[] {

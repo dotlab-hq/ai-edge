@@ -93,7 +93,18 @@ export async function generateTemplate(): Promise<string> {
       }
       // Add more backends as needed
     ]
-  }
+  },
+
+  // Optional: Built-in tools (web search, code interpreter)
+  // "tools": {
+  //   "codeInterpreter": {
+  //     "type": "daytona",
+  //     "apiKey": "\${DAYTONA_API_KEY}",
+  //     "language": "python",
+  //     "timeout": 300,
+  //     "target": "us"
+  //   }
+  // }
 
   // Optional: Proxy configuration (commented out by default)
   // "proxy": "http://user:pass@proxy.com:port"

@@ -6,6 +6,15 @@ import { CONFIG } from '@/utils/schema.lookup';
 import { fetchWithProxy } from '@/utils/proxyFetch';
 import type { Config } from '@/schema';
 import { webSearchManager, type WebSearchResponse } from './WebSearchManager';
+import { codeInterpreterManager } from './CodeInterpreterManager';
+import {
+    buildCodeInterpreterToolDefinition,
+    normalizeToolChoice,
+    runCodeInterpreterToolLoop,
+    stripCodeInterpreterTools,
+    type CodeInterpreterToolRun,
+    isCodeInterpreterTool,
+} from './codeInterpreterFlow';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 
@@ -58,11 +67,11 @@ export class OpenAIProxy {
     }
 
     private async handleResponses( c: Context ) {
-        return this.proxyRequest( c, 'responses' );
+        return this.handleOpenAIRequest( c, 'responses' );
     }
 
     private async handleChatCompletions( c: Context ) {
-        return this.proxyRequest( c, 'chat/completions' );
+        return this.handleOpenAIRequest( c, 'chat/completions' );
     }
 
     private async handleEmbeddings( c: Context ) {
@@ -81,6 +90,16 @@ export class OpenAIProxy {
         return this.proxyRequest( c, 'images/edits' );
     }
 
+    private async handleOpenAIRequest( c: Context, endpoint: string ) {
+        const rawBody = await c.req.json().catch( () => ( {} ) );
+
+        if ( this.shouldUseOpenAICodeInterpreter( rawBody ) ) {
+            return this.proxyCodeInterpreterRequest( c, endpoint, rawBody );
+        }
+
+        return this.proxyRequest( c, endpoint, 1, rawBody );
+    }
+
     private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {
         if ( config.individualLimit && config.rateLimit ) {
             return config.rateLimit;
@@ -88,9 +107,9 @@ export class OpenAIProxy {
         return CONFIG.rateLimit;
     }
 
-    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1 ): Promise<any> {
-        const rawBody = await c.req.json().catch( () => ( {} ) );
-        const webSearchContext = await this.prepareWebSearchForOpenAI( rawBody, endpoint );
+    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1, rawBody?: any ): Promise<any> {
+        const resolvedBody = rawBody ?? await c.req.json().catch( () => ( {} ) );
+        const webSearchContext = await this.prepareWebSearchForOpenAI( resolvedBody, endpoint );
         if ( webSearchContext.errorResponse ) {
             return c.json( webSearchContext.errorResponse.body, webSearchContext.errorResponse.status as any );
         }
@@ -171,7 +190,7 @@ export class OpenAIProxy {
                             const redirectModel = this.extractModelFromLocation( location );
                             if ( redirectModel && redirectModel !== modelName ) {
                                 body.model = redirectModel;
-                                return this.proxyRequest( c, endpoint, redirectDepth + 1 );
+                                return this.proxyRequest( c, endpoint, redirectDepth + 1, body );
                             }
                         }
                     }
@@ -414,6 +433,293 @@ export class OpenAIProxy {
                 cached: searchResponse.cached,
             },
         };
+    }
+
+    private shouldUseOpenAICodeInterpreter( body: any ): boolean {
+        if ( !codeInterpreterManager.isEnabled() ) {
+            return false;
+        }
+
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        return tools.some( ( tool: any ) => isCodeInterpreterTool( tool ) );
+    }
+
+    private async proxyCodeInterpreterRequest( c: Context, endpoint: string, rawBody: any ): Promise<any> {
+        const webSearchContext = await this.prepareWebSearchForOpenAI( rawBody, endpoint );
+        if ( webSearchContext.errorResponse ) {
+            return c.json( webSearchContext.errorResponse.body, webSearchContext.errorResponse.status as any );
+        }
+
+        const body = webSearchContext.body;
+        const modelName = body.model;
+        let lastFailure: { status: number; payload: any } | null = null;
+
+        if ( body.stream === true ) {
+            return c.json( {
+                error: {
+                    message: 'code_interpreter does not currently support streaming responses',
+                    type: 'invalid_request_error'
+                }
+            }, 400 );
+        }
+
+        if ( !modelName || typeof modelName !== 'string' ) {
+            return c.json( {
+                error: {
+                    message: 'Model is required and must be a string',
+                    type: 'invalid_request_error'
+                }
+            }, 400 );
+        }
+
+        const matchingBackends = this.getBackendsForModel( modelName, endpoint );
+        if ( !matchingBackends.length ) {
+            console.error( `[${endpoint}] No backends found for model: ${modelName}` );
+            return c.json( {
+                error: {
+                    message: `Model not found: ${modelName}`,
+                    type: 'invalid_request_error'
+                }
+            }, 400 );
+        }
+
+        const backends = this.getRoundRobinBackends( modelName, matchingBackends );
+        const backendIds = backends.map( b => b.id ).join( ', ' );
+        console.error( `[${endpoint}] Attempting code interpreter backends for model ${modelName}: ${backendIds}` );
+
+        for ( const config of backends ) {
+            const candidateModels = this.getCandidateModelsForProvider( config, modelName );
+
+            for ( const selectedModel of candidateModels ) {
+                try {
+                    const { payload } = await this.runCodeInterpreterFlow( config, body, endpoint, selectedModel );
+                    const enrichedPayload = this.attachUsageIfMissing( endpoint, body, payload );
+                    return c.json( this.attachWebSearchMetadata( endpoint, enrichedPayload, webSearchContext.searchResponse ), 200 );
+                } catch ( error: any ) {
+                    if ( error?.rateLimitExceeded ) {
+                        continue;
+                    }
+
+                    lastFailure = {
+                        status: error?.status ?? 502,
+                        payload: error?.payload ?? {
+                            error: {
+                                message: error?.message || 'Upstream request failed',
+                                type: 'upstream_error'
+                            }
+                        }
+                    };
+                    console.error( `[${endpoint}] Code interpreter error from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
+                    continue;
+                }
+            }
+        }
+
+        if ( lastFailure ) {
+            const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
+            console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+            return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
+        }
+
+        console.error( `\n❌ [${endpoint}] ALL PROVIDERS FAILED - No response from any backend\nModel: ${modelName}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+        return c.json( {
+            error: {
+                message: 'All providers failed',
+                type: 'internal_error'
+            }
+        }, 502 );
+    }
+
+    private async runCodeInterpreterFlow( config: OpenAIModelConfig, body: any, endpoint: string, selectedModel: string ): Promise<{ payload: any }> {
+        const { request: chatRequest, responseMode } = this.normalizeCodeInterpreterRequest( body, endpoint, selectedModel );
+        const { tools } = stripCodeInterpreterTools( chatRequest.tools );
+        const toolDefinition = buildCodeInterpreterToolDefinition();
+        const toolChoice = normalizeToolChoice( body.tool_choice );
+        const rateLimit = this.getEffectiveRateLimit( config );
+        const upstreamEndpoint = 'chat/completions';
+        const sessionId = this.resolveCodeInterpreterSessionId( body );
+
+        const callModel = async ( request: any ) => {
+            const url = this.buildApiUrl( config, upstreamEndpoint );
+            const response = await fetchWithProxy( url, {
+                method: 'POST',
+                headers: this.buildHeaders( config ),
+                body: JSON.stringify( request ),
+            }, CONFIG.proxy );
+            const payload = await this.parseResponsePayload( response );
+
+            if ( !response.ok ) {
+                const error = new Error( `Upstream request failed with ${response.status}` );
+                ( error as any ).status = response.status;
+                ( error as any ).payload = payload;
+                throw error;
+            }
+
+            return { response, payload };
+        };
+
+        const onBeforeRequest = async ( request: any ) => {
+            const tokens = this.calculateTokenCount( request );
+            const rateCheck = await rateLimitManager.checkAndConsume(
+                config.id,
+                tokens,
+                rateLimit,
+                selectedModel
+            );
+
+            if ( !rateCheck.allowed ) {
+                const error = new Error( 'Rate limit exceeded' );
+                ( error as any ).rateLimitExceeded = true;
+                throw error;
+            }
+        };
+
+        const { payload, toolRuns } = await runCodeInterpreterToolLoop( {
+            request: {
+                ...chatRequest,
+                tools,
+            },
+            toolDefinition,
+            toolChoice,
+            callModel,
+            onBeforeRequest,
+            executeCode: async ( code, toolSessionId ) => codeInterpreterManager.executePython( code, toolSessionId ),
+            sessionId,
+        } );
+
+        if ( responseMode === 'responses' ) {
+            return {
+                payload: this.buildResponsesPayloadFromChat( body, payload, toolRuns ),
+            };
+        }
+
+        return { payload };
+    }
+
+    private normalizeCodeInterpreterRequest( body: any, endpoint: string, selectedModel: string ): { request: any; responseMode: 'chat' | 'responses' } {
+        if ( endpoint === 'chat/completions' ) {
+            return {
+                request: {
+                    ...body,
+                    model: selectedModel,
+                    stream: false,
+                },
+                responseMode: 'chat',
+            };
+        }
+
+        const inputText = this.collectTokenStrings( body?.input ).join( ' ' ).trim();
+        const instructionsText = this.collectTokenStrings( body?.instructions ).join( ' ' ).trim();
+        const messages = [] as Array<{ role: string; content: string }>;
+
+        if ( instructionsText ) {
+            messages.push( {
+                role: 'system',
+                content: instructionsText,
+            } );
+        }
+
+        if ( inputText ) {
+            messages.push( {
+                role: 'user',
+                content: inputText,
+            } );
+        }
+
+        return {
+            request: {
+                model: selectedModel,
+                messages,
+                temperature: body.temperature,
+                top_p: body.top_p,
+                max_tokens: body.max_output_tokens ?? body.max_tokens,
+                presence_penalty: body.presence_penalty,
+                frequency_penalty: body.frequency_penalty,
+                seed: body.seed,
+                stop: body.stop,
+                stream: false,
+                tools: body.tools,
+                tool_choice: body.tool_choice,
+            },
+            responseMode: 'responses',
+        };
+    }
+
+    private buildResponsesPayloadFromChat( requestBody: any, chatResponse: any, toolRuns: CodeInterpreterToolRun[] ): any {
+        const output: any[] = [];
+
+        for ( const run of toolRuns ) {
+            output.push( this.buildCodeInterpreterCallOutput( run ) );
+        }
+
+        const messageText = chatResponse?.choices?.[0]?.message?.content ?? '';
+        output.push( {
+            type: 'message',
+            id: `msg_${Date.now().toString( 36 )}`,
+            role: 'assistant',
+            content: messageText
+                ? [
+                    {
+                        type: 'output_text',
+                        text: messageText,
+                        annotations: [],
+                        phase: 'final',
+                    }
+                ]
+                : [],
+        } );
+
+        const usage = chatResponse?.usage
+            ? {
+                input_tokens: chatResponse.usage.prompt_tokens ?? 0,
+                output_tokens: chatResponse.usage.completion_tokens ?? 0,
+                total_tokens: chatResponse.usage.total_tokens
+                    ?? ( ( chatResponse.usage.prompt_tokens ?? 0 ) + ( chatResponse.usage.completion_tokens ?? 0 ) ),
+            }
+            : this.buildUsageForEndpoint( 'responses', requestBody, { output } );
+
+        return {
+            id: `resp_${Date.now().toString( 36 )}`,
+            object: 'response',
+            created: Math.floor( Date.now() / 1000 ),
+            model: requestBody.model,
+            output,
+            usage,
+        };
+    }
+
+    private buildCodeInterpreterCallOutput( run: CodeInterpreterToolRun ): any {
+        const logs = run.stderr || run.stdout || '';
+        return {
+            type: 'code_interpreter_call',
+            id: run.id || `ci_${Date.now().toString( 36 )}`,
+            code: run.code,
+            status: run.exitCode === 0 ? 'completed' : 'failed',
+            outputs: [
+                {
+                    type: 'logs',
+                    logs,
+                }
+            ],
+        };
+    }
+
+    private resolveCodeInterpreterSessionId( body: any ): string {
+        if ( typeof body?.container === 'string' ) {
+            return body.container;
+        }
+
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        for ( const tool of tools ) {
+            if ( typeof tool?.container === 'string' ) {
+                return tool.container;
+            }
+            if ( typeof tool?.container?.id === 'string' ) {
+                return tool.container.id;
+            }
+        }
+
+        return `ci_${Date.now().toString( 36 )}_${Math.random().toString( 36 ).slice( 2, 8 )}`;
     }
 
     private isRedirectStatus( status: number ): boolean {

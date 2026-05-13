@@ -119,6 +119,103 @@
             "tools"
           ],
           "additionalProperties": false
+        },
+        "code_interpreter": {
+          "description": "Alias for codeInterpreter (optional code interpreter provider)",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "daytona"
+              ]
+            },
+            "apiKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "apiUrl": {
+              "type": "string",
+              "format": "uri"
+            },
+            "language": {
+              "type": "string",
+              "enum": [
+                "python",
+                "typescript",
+                "javascript"
+              ]
+            },
+            "timeout": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "target": {
+              "type": "string",
+              "enum": [
+                "us",
+                "eu"
+              ]
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "snapshot": {
+              "type": "string",
+              "minLength": 1
+            },
+            "resources": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "memory": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "disk": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "additionalProperties": false
+            },
+            "autoStopInterval": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "labels": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "initialFiles": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "apiKey"
+          ],
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

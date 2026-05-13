@@ -107,8 +107,30 @@ const WebSearchSchema = z.object( {
   tools: z.array( WebSearchToolSchema ).min( 1, 'tools.webSearch.tools must contain at least one provider' ),
 } ).optional()
 
+const CodeInterpreterResourcesSchema = z.object( {
+  cpu: z.number( { error: 'cpu must be a number' } ).int( 'cpu must be an integer' ).positive( 'cpu must be > 0' ).optional(),
+  memory: z.number( { error: 'memory must be a number' } ).int( 'memory must be an integer' ).positive( 'memory must be > 0' ).optional(),
+  disk: z.number( { error: 'disk must be a number' } ).int( 'disk must be an integer' ).positive( 'disk must be > 0' ).optional(),
+} ).strict().optional()
+
+const CodeInterpreterSchema = z.object( {
+  type: z.enum( ['daytona'] ),
+  apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
+  apiUrl: z.url( 'apiUrl must be a valid URL' ).optional(),
+  language: z.enum( ['python', 'typescript', 'javascript'] ).optional(),
+  timeout: z.number( { error: 'timeout must be a number' } ).int( 'timeout must be an integer' ).positive( 'timeout must be > 0' ).optional(),
+  target: z.enum( ['us', 'eu'] ).optional(),
+  image: z.string( { error: 'image must be a string' } ).min( 1, 'image cannot be empty' ).optional(),
+  snapshot: z.string( { error: 'snapshot must be a string' } ).min( 1, 'snapshot cannot be empty' ).optional(),
+  resources: CodeInterpreterResourcesSchema,
+  autoStopInterval: z.number( { error: 'autoStopInterval must be a number' } ).int( 'autoStopInterval must be an integer' ).min( 0, 'autoStopInterval must be >= 0' ).optional(),
+  labels: z.record( z.string(), z.string( { error: 'labels values must be strings' } ) ).optional(),
+  initialFiles: z.record( z.string(), z.string( { error: 'initialFiles values must be strings' } ) ).optional(),
+} ).strict()
+
 const ToolsSchema = z.object( {
   webSearch: WebSearchSchema.describe( 'Optional built-in web search providers used to satisfy OpenAI and Anthropic web search tool requests' ),
+  code_interpreter: CodeInterpreterSchema.optional().describe( 'Alias for codeInterpreter (optional code interpreter provider)' ),
 } ).optional()
 
 export const ConfigSchema = z.object( {
