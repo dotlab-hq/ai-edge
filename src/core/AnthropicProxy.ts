@@ -12,6 +12,7 @@ import { webSearchHandler } from './WebSearchHandler';
 import { codeInterpreterHandler } from './CodeInterpreterHandler';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
+type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 const AUTO_MODEL_ID = 'auto';
 
 export class AnthropicProxy {
@@ -82,10 +83,11 @@ export class AnthropicProxy {
           async ( request: any ) => {
             const config = this.getBackendConfigForModel( requestedModel );
             const url = `${this.normalizeBaseUrl( config.baseUrl )}/chat/completions`;
+            const upstreamRequest = this.withReasoningEffort( request, body, config, request?.model ?? requestedModel );
             const response = await fetchWithProxy( url, {
               method: 'POST',
               headers: this.buildHeaders( config ),
-              body: JSON.stringify( request ),
+              body: JSON.stringify( upstreamRequest ),
             }, CONFIG.proxy );
             const payload = await this.parseResponsePayload( response );
             if ( !response.ok ) {
@@ -162,7 +164,12 @@ export class AnthropicProxy {
         }
 
         try {
-          const openAIRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
+          const openAIRequest = this.withReasoningEffort(
+            convertAnthropicRequestToOpenAI( body, selectedModel, 'native' ),
+            body,
+            config,
+            selectedModel
+          );
           const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
           const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
           const response = await fetchWithProxy( url, {
@@ -385,6 +392,43 @@ export class AnthropicProxy {
 
     const startIndex = Math.floor( Math.random() * uniqueModels.length );
     return [...uniqueModels.slice( startIndex ), ...uniqueModels.slice( 0, startIndex )];
+  }
+
+  private withReasoningEffort( openAIRequest: any, sourceBody: any, config: OpenAIModelConfig, selectedModel: string ): any {
+    const effort = this.resolveReasoningEffort( sourceBody, config, selectedModel );
+    if ( !effort || effort === 'none' ) {
+      return openAIRequest;
+    }
+
+    return {
+      ...openAIRequest,
+      reasoning_effort: effort,
+    };
+  }
+
+  private resolveReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): ReasoningEffort | undefined {
+    if ( typeof body?.reasoning_effort === 'string' ) {
+      return body.reasoning_effort as ReasoningEffort;
+    }
+
+    if ( typeof body?.reasoning?.effort === 'string' ) {
+      return body.reasoning.effort as ReasoningEffort;
+    }
+
+    if ( typeof body?.thinking?.effort === 'string' ) {
+      return body.thinking.effort as ReasoningEffort;
+    }
+
+    const modelEntry = config.models.find( model => {
+      const modelName = typeof model === 'string' ? model : model.model;
+      return stripFreeModifier( modelName ).normalizedId === stripFreeModifier( selectedModel ).normalizedId;
+    } );
+
+    if ( modelEntry && typeof modelEntry === 'object' && modelEntry.default_reasoning ) {
+      return modelEntry.default_reasoning;
+    }
+
+    return config.default_reasoning ?? 'medium';
   }
 
   private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {

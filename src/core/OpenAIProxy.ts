@@ -19,6 +19,7 @@ import {
 } from './codeInterpreterFlow';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
+type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 const AUTO_MODEL_ID = 'auto';
 
 export class OpenAIProxy {
@@ -154,8 +155,9 @@ export class OpenAIProxy {
 
             for ( const selectedModel of candidateModels ) {
                 body.model = selectedModel;
+                const upstreamBody = this.withReasoningEffort( body, config, selectedModel );
 
-                const tokens = this.calculateTokenCount( body );
+                const tokens = this.calculateTokenCount( upstreamBody );
                 const rateLimit = this.getEffectiveRateLimit( config );
                 const rateCheck = await rateLimitManager.checkAndConsume(
                     config.id,
@@ -174,7 +176,7 @@ export class OpenAIProxy {
                     const response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
-                        body: JSON.stringify( body ),
+                        body: JSON.stringify( upstreamBody ),
                     }, CONFIG.proxy );
 
                     if ( response.status === 429 ) {
@@ -193,7 +195,7 @@ export class OpenAIProxy {
                     }
 
                     // Handle streaming responses
-                    if ( body.stream === true ) {
+                    if ( upstreamBody.stream === true ) {
                         c.header( 'Content-Type', 'text/event-stream' );
                         c.header( 'Cache-Control', 'no-cache' );
                         c.header( 'Connection', 'keep-alive' );
@@ -231,7 +233,7 @@ export class OpenAIProxy {
                         continue;
                     }
 
-                    const enrichedPayload = this.attachUsageIfMissing( endpoint, body, payload );
+                    const enrichedPayload = this.attachUsageIfMissing( endpoint, upstreamBody, payload );
                     return c.json( this.attachWebSearchMetadata( endpoint, enrichedPayload, webSearchContext.searchResponse ), response.status as any );
                 } catch ( error: any ) {
                     lastFailure = {
@@ -529,7 +531,8 @@ export class OpenAIProxy {
 
     private async runCodeInterpreterFlow( config: OpenAIModelConfig, body: any, endpoint: string, selectedModel: string ): Promise<{ payload: any }> {
         const { request: chatRequest, responseMode } = this.normalizeCodeInterpreterRequest( body, endpoint, selectedModel );
-        const { tools } = stripCodeInterpreterTools( chatRequest.tools );
+        const chatRequestWithReasoning = this.withReasoningEffort( chatRequest, config, selectedModel );
+        const { tools } = stripCodeInterpreterTools( chatRequestWithReasoning.tools );
         const toolDefinition = buildCodeInterpreterToolDefinition();
         const toolChoice = normalizeToolChoice( body.tool_choice );
         const rateLimit = this.getEffectiveRateLimit( config );
@@ -573,7 +576,7 @@ export class OpenAIProxy {
 
         const { payload, toolRuns } = await runCodeInterpreterToolLoop( {
             request: {
-                ...chatRequest,
+                ...chatRequestWithReasoning,
                 tools,
             },
             toolDefinition,
@@ -600,6 +603,8 @@ export class OpenAIProxy {
                     ...body,
                     model: selectedModel,
                     stream: false,
+                    reasoning_effort: body.reasoning_effort,
+                    reasoning: body.reasoning,
                 },
                 responseMode: 'chat',
             };
@@ -637,6 +642,8 @@ export class OpenAIProxy {
                 stream: false,
                 tools: body.tools,
                 tool_choice: body.tool_choice,
+                reasoning_effort: body.reasoning_effort,
+                reasoning: body.reasoning,
             },
             responseMode: 'responses',
         };
@@ -878,6 +885,39 @@ export class OpenAIProxy {
             ...uniqueModels.slice( startIndex ),
             ...uniqueModels.slice( 0, startIndex ),
         ];
+    }
+
+    private withReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): any {
+        const effort = this.resolveReasoningEffort( body, config, selectedModel );
+        if ( !effort || effort === 'none' ) {
+            return body;
+        }
+
+        return {
+            ...body,
+            reasoning_effort: effort,
+        };
+    }
+
+    private resolveReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): ReasoningEffort | undefined {
+        if ( typeof body?.reasoning_effort === 'string' ) {
+            return body.reasoning_effort as ReasoningEffort;
+        }
+
+        if ( typeof body?.reasoning?.effort === 'string' ) {
+            return body.reasoning.effort as ReasoningEffort;
+        }
+
+        const modelEntry = config.models.find( model => {
+            const modelName = typeof model === 'string' ? model : model.model;
+            return stripFreeModifier( modelName ).normalizedId === stripFreeModifier( selectedModel ).normalizedId;
+        } );
+
+        if ( modelEntry && typeof modelEntry === 'object' && modelEntry.default_reasoning ) {
+            return modelEntry.default_reasoning;
+        }
+
+        return config.default_reasoning ?? 'medium';
     }
 
     private async parseResponsePayload( response: Response ): Promise<any> {

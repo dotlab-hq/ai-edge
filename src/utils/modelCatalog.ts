@@ -41,8 +41,18 @@ export type UnifiedModelCatalogEntry = {
     };
     context_length: number;
     supported_parameters: string[];
+    capabilities: {
+        reasoning: boolean;
+        thinking: boolean;
+        reasoning_levels: Array<Exclude<ReasoningEffort, 'none'>>;
+    };
+    supports_reasoning: boolean;
+    reasoning: boolean;
+    reasoning_effort: boolean;
+    thinking: boolean;
+    output_reasoning: boolean;
     opencode: {
-        ai_sdk_provider: 'anthropic';
+        ai_sdk_provider: 'ai-edge';
         variants: Record<string, {
             reasoning: {
                 enabled: boolean;
@@ -129,6 +139,14 @@ function buildEffortSupport( efforts: ReasoningEffort[] ): UnifiedModelCatalogEn
         supported: efforts.some( effort => effort !== 'none' ),
         ...Object.fromEntries( efforts.map( effort => [effort, { supported: true }] ) ),
     };
+}
+
+function supportsReasoningEfforts( efforts: ReasoningEffort[] ): boolean {
+    return efforts.some( effort => effort !== 'none' );
+}
+
+function getReasoningLevels( efforts: ReasoningEffort[] ): Array<Exclude<ReasoningEffort, 'none'>> {
+    return efforts.filter( ( effort ): effort is Exclude<ReasoningEffort, 'none'> => effort !== 'none' );
 }
 
 function getConfigModelMetas( config: ProviderConfig ): Array<{ normalizedId: string; id: string; isFree: boolean; order: number; reasoningEfforts: ReasoningEffort[]; defaultReasoning: ReasoningEffort }> {
@@ -281,9 +299,13 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
             if ( normalized.toolCallSupported ) {
                 supportedParameters.add( 'tools' );
             }
-            if ( normalized.reasoningSupported || configMeta.reasoningEfforts.some( effort => effort !== 'none' ) ) {
+            const reasoningSupported = normalized.reasoningSupported || supportsReasoningEfforts( configMeta.reasoningEfforts );
+            if ( reasoningSupported ) {
                 supportedParameters.add( 'reasoning' );
                 supportedParameters.add( 'include_reasoning' );
+                supportedParameters.add( 'reasoning_effort' );
+                supportedParameters.add( 'thinking' );
+                supportedParameters.add( 'output_reasoning' );
             }
 
             const entry: UnifiedModelCatalogEntry = {
@@ -314,8 +336,18 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                         ? normalized.limit.input
                         : 0,
                 supported_parameters: Array.from( supportedParameters ),
+                capabilities: {
+                    reasoning: reasoningSupported,
+                    thinking: reasoningSupported,
+                    reasoning_levels: getReasoningLevels( configMeta.reasoningEfforts ),
+                },
+                supports_reasoning: reasoningSupported,
+                reasoning: reasoningSupported,
+                reasoning_effort: reasoningSupported,
+                thinking: reasoningSupported,
+                output_reasoning: reasoningSupported,
                 opencode: {
-                    ai_sdk_provider: 'anthropic',
+                    ai_sdk_provider: 'ai-edge',
                     variants: buildOpenCodeVariants( configMeta.reasoningEfforts ),
                 },
                 effort: buildEffortSupport( configMeta.reasoningEfforts ),
@@ -358,9 +390,19 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                 max_completion_tokens: 0,
             },
             context_length: 0,
-            supported_parameters: ['max_tokens', 'temperature', 'tools'],
+            supported_parameters: ['max_tokens', 'temperature', 'tools', 'reasoning', 'include_reasoning', 'reasoning_effort', 'thinking', 'output_reasoning'],
+            capabilities: {
+                reasoning: true,
+                thinking: true,
+                reasoning_levels: getReasoningLevels( DEFAULT_REASONING_EFFORTS ),
+            },
+            supports_reasoning: true,
+            reasoning: true,
+            reasoning_effort: true,
+            thinking: true,
+            output_reasoning: true,
             opencode: {
-                ai_sdk_provider: 'anthropic',
+                ai_sdk_provider: 'ai-edge',
                 variants: buildOpenCodeVariants( DEFAULT_REASONING_EFFORTS ),
             },
             effort: buildEffortSupport( DEFAULT_REASONING_EFFORTS ),
