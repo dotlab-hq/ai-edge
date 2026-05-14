@@ -273,6 +273,34 @@
                             }
                           },
                           "additionalProperties": false
+                        },
+                        "reasoning_efforts": {
+                          "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                          "minItems": 1,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          }
+                        },
+                        "default_reasoning": {
+                          "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                          ]
                         }
                       },
                       "required": [
@@ -346,6 +374,34 @@
                 "default": true,
                 "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
+              },
+              "reasoning_efforts": {
+                "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "default_reasoning": {
+                "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                "type": "string",
+                "enum": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
               }
             },
             "required": [
@@ -411,6 +467,34 @@
                             }
                           },
                           "additionalProperties": false
+                        },
+                        "reasoning_efforts": {
+                          "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                          "minItems": 1,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          }
+                        },
+                        "default_reasoning": {
+                          "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                          ]
                         }
                       },
                       "required": [
@@ -459,6 +543,34 @@
                 "default": true,
                 "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
+              },
+              "reasoning_efforts": {
+                "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "default_reasoning": {
+                "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                "type": "string",
+                "enum": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
               }
             },
             "required": [

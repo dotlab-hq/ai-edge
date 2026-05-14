@@ -4,6 +4,8 @@ import { CONFIG } from '@/utils/schema.lookup';
 import type { Config } from '@/schema';
 
 type ProviderConfig = NonNullable<Config['models']['openai']>[number];
+type ConfigModelEntry = ProviderConfig['models'][number];
+type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 const AUTO_MODEL_ID = 'Auto-Edge';
 const MODEL_CREATED_AT = Math.floor( Date.now() / 1000 );
 
@@ -39,7 +41,17 @@ export type UnifiedModelCatalogEntry = {
     };
     context_length: number;
     supported_parameters: string[];
-    opencode: Record<string, never>;
+    opencode: {
+        ai_sdk_provider: 'anthropic';
+        variants: Record<string, {
+            reasoning: {
+                enabled: boolean;
+                effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+            };
+            verbosity?: string;
+        }>;
+    };
+    effort: Record<string, { supported: boolean } | boolean>;
     preferredIndex: number;
     isFree: boolean;
     providers: string[];
@@ -74,11 +86,57 @@ function buildModelsUrl( baseUrl: string ): string {
     return `${normalizeBaseUrl( baseUrl )}/models`;
 }
 
-function getConfigModelMetas( config: ProviderConfig ): Array<{ normalizedId: string; id: string; isFree: boolean; order: number }> {
+const DEFAULT_REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high'];
+
+function isModelObject( modelEntry: ConfigModelEntry | undefined ): modelEntry is Extract<ConfigModelEntry, object> {
+    return typeof modelEntry === 'object' && modelEntry !== null;
+}
+
+function getReasoningConfig( config: ProviderConfig, modelEntry?: ConfigModelEntry ): { efforts: ReasoningEffort[]; defaultReasoning: ReasoningEffort } {
+    const source = isModelObject( modelEntry ) && ( modelEntry.reasoning_efforts || modelEntry.default_reasoning )
+        ? modelEntry
+        : config;
+    const efforts = ( source.reasoning_efforts?.length ? source.reasoning_efforts : DEFAULT_REASONING_EFFORTS ) as ReasoningEffort[];
+    const defaultReasoning = ( source.default_reasoning ?? 'medium' ) as ReasoningEffort;
+
+    return {
+        efforts,
+        defaultReasoning: efforts.includes( defaultReasoning ) ? defaultReasoning : efforts[0] ?? 'medium',
+    };
+}
+
+function buildOpenCodeVariants( efforts: ReasoningEffort[] ): UnifiedModelCatalogEntry['opencode']['variants'] {
+    return Object.fromEntries( efforts.map( effort => {
+        if ( effort === 'none' ) {
+            return [effort, { reasoning: { enabled: false, effort: 'none' } }];
+        }
+
+        return [
+            effort,
+            {
+                reasoning: {
+                    enabled: true,
+                    effort: effort === 'max' ? 'xhigh' : effort,
+                },
+                verbosity: effort,
+            },
+        ];
+    } ) );
+}
+
+function buildEffortSupport( efforts: ReasoningEffort[] ): UnifiedModelCatalogEntry['effort'] {
+    return {
+        supported: efforts.some( effort => effort !== 'none' ),
+        ...Object.fromEntries( efforts.map( effort => [effort, { supported: true }] ) ),
+    };
+}
+
+function getConfigModelMetas( config: ProviderConfig ): Array<{ normalizedId: string; id: string; isFree: boolean; order: number; reasoningEfforts: ReasoningEffort[]; defaultReasoning: ReasoningEffort }> {
     return config.models.map( ( modelEntry, order ) => {
         const rawId = typeof modelEntry === 'string' ? modelEntry : modelEntry.model;
         const { normalizedId, isFree } = stripFreeModifier( rawId );
-        return { normalizedId, id: rawId, isFree, order };
+        const reasoning = getReasoningConfig( config, modelEntry );
+        return { normalizedId, id: rawId, isFree, order, reasoningEfforts: reasoning.efforts, defaultReasoning: reasoning.defaultReasoning };
     } );
 }
 
@@ -223,7 +281,7 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
             if ( normalized.toolCallSupported ) {
                 supportedParameters.add( 'tools' );
             }
-            if ( normalized.reasoningSupported ) {
+            if ( normalized.reasoningSupported || configMeta.reasoningEfforts.some( effort => effort !== 'none' ) ) {
                 supportedParameters.add( 'reasoning' );
                 supportedParameters.add( 'include_reasoning' );
             }
@@ -256,7 +314,11 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                         ? normalized.limit.input
                         : 0,
                 supported_parameters: Array.from( supportedParameters ),
-                opencode: {},
+                opencode: {
+                    ai_sdk_provider: 'anthropic',
+                    variants: buildOpenCodeVariants( configMeta.reasoningEfforts ),
+                },
+                effort: buildEffortSupport( configMeta.reasoningEfforts ),
                 preferredIndex: configMeta.order,
                 isFree,
                 providers: existing ? Array.from( new Set( [...existing.providers, catalog.providerName] ) ) : [catalog.providerName],
@@ -297,7 +359,11 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
             },
             context_length: 0,
             supported_parameters: ['max_tokens', 'temperature', 'tools'],
-            opencode: {},
+            opencode: {
+                ai_sdk_provider: 'anthropic',
+                variants: buildOpenCodeVariants( DEFAULT_REASONING_EFFORTS ),
+            },
+            effort: buildEffortSupport( DEFAULT_REASONING_EFFORTS ),
             preferredIndex: -1,
             isFree: false,
             providers: Array.from( allProviderNames ),

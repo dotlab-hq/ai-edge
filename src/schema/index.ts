@@ -17,12 +17,29 @@ const ImageModelsSchema = z.union( [
   } ).strict(),
 ] ).optional().describe( 'If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.' )
 
-const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).default( false ).describe( 'If true, this provider supports embeddings endpoint' )
+const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider supports embeddings endpoint' )
+
+const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
+
+const ReasoningConfigFields = {
+  reasoning_efforts: z.array( ReasoningEffortSchema ).min( 1, 'reasoning_efforts must contain at least one effort' ).optional().describe( 'Reasoning effort levels supported by this provider or model. Defaults to ["low", "medium", "high"] when omitted' ),
+  default_reasoning: ReasoningEffortSchema.optional().describe( 'Default reasoning effort. Must be one of reasoning_efforts and defaults to "medium" when omitted' ),
+}
+
+function validateReasoningConfig( val: { reasoning_efforts?: string[]; default_reasoning?: string }, ctx: z.RefinementCtx ) {
+  const efforts = val.reasoning_efforts ?? ['low', 'medium', 'high']
+  const defaultReasoning = val.default_reasoning ?? 'medium'
+
+  if ( !efforts.includes( defaultReasoning ) ) {
+    ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['default_reasoning'], message: 'default_reasoning must be one of reasoning_efforts' } )
+  }
+}
 
 const ModelWithRateLimitSchema = z.object( {
   model: z.string( { error: 'model is required' } ).min( 1, 'model cannot be empty' ),
   rateLimit: RateLimitSpec,
-} ).strict()
+  ...ReasoningConfigFields,
+} ).strict().superRefine( validateReasoningConfig )
 
 const OpenAIModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
@@ -35,6 +52,7 @@ const OpenAIModelSchema = z.object( {
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
+  ...ReasoningConfigFields,
 } )
 
   .superRefine( ( val, ctx ) => {
@@ -51,7 +69,14 @@ const OpenAIModelSchema = z.object( {
       if ( val.individualLimit === false ) {
         ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'individualLimit cannot be false when using per-model rate limits' } )
       }
+
+      const providerHasReasoning = Object.prototype.hasOwnProperty.call( val, 'reasoning_efforts' ) || Object.prototype.hasOwnProperty.call( val, 'default_reasoning' )
+      const modelHasReasoning = models.some( m => typeof m === 'object' && ( Object.prototype.hasOwnProperty.call( m, 'reasoning_efforts' ) || Object.prototype.hasOwnProperty.call( m, 'default_reasoning' ) ) )
+      if ( providerHasReasoning && modelHasReasoning ) {
+        ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'reasoning config must be defined either at provider level or per-model level, not both' } )
+      }
     }
+    validateReasoningConfig( val, ctx )
   } )
 
 const AnthropicModelSchema = z.object( {
@@ -63,6 +88,7 @@ const AnthropicModelSchema = z.object( {
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
+  ...ReasoningConfigFields,
 } )
 
   .superRefine( ( val, ctx ) => {
@@ -79,7 +105,14 @@ const AnthropicModelSchema = z.object( {
       if ( val.individualLimit === false ) {
         ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'individualLimit cannot be false when using per-model rate limits' } )
       }
+
+      const providerHasReasoning = Object.prototype.hasOwnProperty.call( val, 'reasoning_efforts' ) || Object.prototype.hasOwnProperty.call( val, 'default_reasoning' )
+      const modelHasReasoning = models.some( m => typeof m === 'object' && ( Object.prototype.hasOwnProperty.call( m, 'reasoning_efforts' ) || Object.prototype.hasOwnProperty.call( m, 'default_reasoning' ) ) )
+      if ( providerHasReasoning && modelHasReasoning ) {
+        ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'reasoning config must be defined either at provider level or per-model level, not both' } )
+      }
     }
+    validateReasoningConfig( val, ctx )
   } )
 
 const StateAdapterObjectSchema = z.object( {
