@@ -343,8 +343,8 @@
                 "additionalProperties": false
               },
               "randomRouting": {
-                "default": false,
-                "description": "If true, when this provider is selected it may route to any model the provider advertises at random",
+                "default": true,
+                "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
               }
             },
@@ -456,8 +456,8 @@
                 "additionalProperties": false
               },
               "randomRouting": {
-                "default": false,
-                "description": "If true, when this provider is selected it may route to any model the provider advertises at random",
+                "default": true,
+                "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
               }
             },

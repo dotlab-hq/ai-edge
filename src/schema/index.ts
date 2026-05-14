@@ -34,7 +34,7 @@ const OpenAIModelSchema = z.object( {
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
-  randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( false ).describe( 'If true, when this provider is selected it may route to any model the provider advertises at random' ),
+  randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
 } )
 
   .superRefine( ( val, ctx ) => {
@@ -62,7 +62,7 @@ const AnthropicModelSchema = z.object( {
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
-  randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( false ).describe( 'If true, when this provider is selected it may route to any model the provider advertises at random' ),
+  randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
 } )
 
   .superRefine( ( val, ctx ) => {

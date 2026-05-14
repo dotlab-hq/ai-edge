@@ -5,6 +5,7 @@ import { openAIProxy } from "./src/core/OpenAIProxy";
 import { anthropicProxy } from "./src/core/AnthropicProxy";
 import { CONFIG } from "./src/utils/schema.lookup";
 import { rateLimitManager } from "./src/core/RateLimitManager";
+import { getUnifiedModelCatalog, refreshUnifiedModelCatalog } from "./src/utils/modelCatalog";
 
 const app = new Hono()
 app.use( logger() )
@@ -14,6 +15,7 @@ let cachedStats: Record<string, any> = {};
 
 async function loadStats() {
     try {
+        await refreshUnifiedModelCatalog( CONFIG.proxy );
         cachedStats = {};
         const openAIConfigs = CONFIG.models.openai ?? [];
 
@@ -93,29 +95,9 @@ app.get( '/clear', async ( c ) => {
 // v1 models in OpenAI list format
 app.get( '/v1/models', async ( c ) => {
     try {
-        const modelsByName: Record<string, { providers: string[] }> = {}
+        const catalog = await getUnifiedModelCatalog( CONFIG.proxy )
 
-        if ( CONFIG.models?.openai ) {
-            for ( const cfg of CONFIG.models.openai ) {
-                const providerName = cfg.id || cfg.name || 'provider'
-                for ( const mEntry of cfg.models ) {
-                    const modelName = typeof mEntry === 'string' ? mEntry : ( mEntry as any ).model
-                    if ( !modelsByName[modelName] ) modelsByName[modelName] = { providers: [] }
-                    if ( !modelsByName[modelName].providers.includes( providerName ) ) modelsByName[modelName].providers.push( providerName )
-                }
-            }
-        }
-
-        const now = Math.floor( Date.now() / 1000 )
-        const data = Object.entries( modelsByName ).map( ( [id, info] ) => ( {
-            id,
-            object: 'model',
-            created: now,
-            owned_by: info.providers.length === 1 ? info.providers[0] : 'multiple',
-            providers: info.providers
-        } ) )
-
-        return c.json( { object: 'list', data } )
+        return c.json( { object: 'list', data: catalog.data } )
     } catch ( err ) {
         return c.json( { object: 'list', data: [] } )
     }

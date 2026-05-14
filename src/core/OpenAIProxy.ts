@@ -7,6 +7,8 @@ import { fetchWithProxy } from '@/utils/proxyFetch';
 import type { Config } from '@/schema';
 import { webSearchManager, type WebSearchResponse } from './WebSearchManager';
 import { codeInterpreterManager } from './CodeInterpreterManager';
+import { stripFreeModifier } from '@/utils/modelIds';
+import { getUnifiedModelCatalog } from '@/utils/modelCatalog';
 import {
     buildCodeInterpreterToolDefinition,
     normalizeToolChoice,
@@ -17,6 +19,7 @@ import {
 } from './codeInterpreterFlow';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
+const AUTO_MODEL_ID = 'auto';
 
 export class OpenAIProxy {
     private app: Hono;
@@ -49,17 +52,11 @@ export class OpenAIProxy {
                 return c.json( { error: 'No backend configured' }, 503 );
             }
 
-            const firstConfig = this.getNextRoundRobinConfig( '__models__', configs );
-            if ( !firstConfig ) {
-                console.error( '[/v1/models] No backend available' );
-                return c.json( { error: 'No backend configured' }, 503 );
-            }
-
-            const response = await fetchWithProxy( this.buildApiUrl( firstConfig, 'models' ), {
-                headers: this.buildHeaders( firstConfig ),
-            }, CONFIG.proxy );
-            const data = await response.json();
-            return c.json( data, response.status as any );
+            const catalog = await getUnifiedModelCatalog( CONFIG.proxy );
+            return c.json( {
+                object: 'list',
+                data: catalog.data,
+            } );
         } catch ( error: any ) {
             console.error( '[/v1/models] Exception:', error?.message || String( error ) );
             return c.json( { error: 'Failed to fetch models' }, 500 );
@@ -746,28 +743,51 @@ export class OpenAIProxy {
     }
 
     private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
-        return ( CONFIG.models.openai ?? [] ).filter( config => {
-            const matchesRequestedModel = config.models.some( m => ( typeof m === 'string' ? m === modelName : ( m as any ).model === modelName ) );
-            const canRouteWithoutModelMatch = config.randomRouting === true;
+        const configs = CONFIG.models.openai ?? [];
+        const isAutoModel = this.isAutoModel( modelName );
+        const modelIsListed = configs.some( config =>
+            this.configHasModel( config, modelName )
+        );
+
+        const exactBackends: OpenAIModelConfig[] = [];
+        const fallbackBackends: OpenAIModelConfig[] = [];
+
+        for ( const config of configs ) {
+            const matchesRequestedModel = this.configHasModel( config, modelName );
+            const canRouteWithoutModelMatch = ( isAutoModel || config.randomRouting !== false ) && !matchesRequestedModel;
 
             // For image endpoints, filter by capability and allow random routing
             if ( endpoint === 'images/generations' ) {
-                if ( !this.isImageGenerationEnabled( config ) ) return false;
-                return matchesRequestedModel || canRouteWithoutModelMatch;
+                if ( !this.isImageGenerationEnabled( config ) ) continue;
+            } else if ( endpoint === 'images/edits' ) {
+                if ( !this.isImageEditingEnabled( config ) ) continue;
+            } else if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
+                if ( this.isImageOnlyConfig( config ) ) continue;
             }
 
-            if ( endpoint === 'images/edits' ) {
-                if ( !this.isImageEditingEnabled( config ) ) return false;
-                return matchesRequestedModel || canRouteWithoutModelMatch;
+            if ( matchesRequestedModel ) {
+                exactBackends.push( config );
+            } else if ( canRouteWithoutModelMatch ) {
+                fallbackBackends.push( config );
             }
+        }
 
-            // For chat/completions/responses, exclude providers marked as imageModels only
-            if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
-                if ( this.isImageOnlyConfig( config ) ) return false;
-                return matchesRequestedModel || canRouteWithoutModelMatch;
-            }
+        if ( isAutoModel ) {
+            return fallbackBackends;
+        }
 
-            return matchesRequestedModel || canRouteWithoutModelMatch;
+        return modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+    }
+
+    private isAutoModel( modelName: string ): boolean {
+        return stripFreeModifier( modelName ).normalizedId === AUTO_MODEL_ID;
+    }
+
+    private configHasModel( config: OpenAIModelConfig, modelName: string ): boolean {
+        const requestedNormalized = stripFreeModifier( modelName ).normalizedId;
+        return config.models.some( m => {
+            const candidate = typeof m === 'string' ? m : ( m as any ).model;
+            return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
         } );
     }
 
@@ -837,11 +857,17 @@ export class OpenAIProxy {
     }
 
     private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {
-        if ( !config.randomRouting ) {
+        const isAutoModel = this.isAutoModel( requestedModel );
+        if ( config.randomRouting === false && !isAutoModel ) {
             return [requestedModel];
         }
 
         const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+        const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
+        const normalizedModels = modelNames.map( modelName => stripFreeModifier( modelName ).normalizedId );
+        if ( !isAutoModel && normalizedModels.includes( requestedNormalized ) ) {
+            return [requestedModel];
+        }
         const uniqueModels = Array.from( new Set( modelNames ) );
         if ( !uniqueModels.length ) {
             return [requestedModel];
