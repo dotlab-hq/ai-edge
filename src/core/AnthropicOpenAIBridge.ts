@@ -1,5 +1,4 @@
 import type { Context } from 'hono';
-import { stream } from 'hono/streaming';
 import {
     convertRequestToOpenAI,
     convertResponseToAnthropic,
@@ -12,7 +11,6 @@ import {
 
 type StreamWriter = {
     write: ( chunk: string ) => Promise<unknown>;
-    writeln: ( chunk: string ) => Promise<unknown>;
 };
 
 interface StreamToolCallState {
@@ -39,8 +37,6 @@ interface StreamState {
     textBlockOpen: boolean;
     lastFinishReason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null;
     finished: boolean;
-    sentEventHashes?: Set<string>;
-    sentToolUseIds?: Set<string>;
 }
 
 let toolIdCounter = 0;
@@ -66,58 +62,86 @@ export async function streamOpenAIResponseAsAnthropic(
     originalModel: string,
     initialContentBlocks: Array<Record<string, any>> = []
 ): Promise<Response> {
-    c.header( 'Content-Type', 'text/event-stream' );
-    c.header( 'Cache-Control', 'no-cache' );
-    c.header( 'Connection', 'keep-alive' );
-    c.header( 'X-Accel-Buffering', 'no' );
-
-    return stream( c, async ( streamWriter ) => {
-        const reader = response.body?.getReader();
-        if ( !reader ) {
-            await sendErrorEvent( streamWriter, new Error( 'Upstream response did not include a stream' ), originalModel );
+    void c;
+    const encoder = new TextEncoder();
+    let closed = false;
+    const closeController = ( controller: ReadableStreamDefaultController<Uint8Array> ) => {
+        if ( closed ) {
             return;
         }
+        closed = true;
+        controller.close();
+    };
+    const readable = new ReadableStream<Uint8Array>( {
+        async start( controller ) {
+            const streamWriter: StreamWriter = {
+                write: async ( chunk: string ) => {
+                    controller.enqueue( encoder.encode( chunk ) );
+                },
+            };
+            await streamWriter.write( ': stream-start\n\n' );
+            const reader = response.body?.getReader();
+            if ( !reader ) {
+                await sendErrorEvent( streamWriter, new Error( 'Upstream response did not include a stream' ), originalModel );
+                closeController( controller );
+                return;
+            }
 
-        const decoder = new TextDecoder();
-        const state = createStreamState( originalModel, initialContentBlocks );
-        let buffer = '';
+            const decoder = new TextDecoder();
+            const state = createStreamState( originalModel, initialContentBlocks );
+            let buffer = '';
 
-        try {
-            while ( true ) {
-                const { done, value } = await reader.read();
-                if ( done ) {
-                    break;
+            try {
+                while ( true ) {
+                    const { done, value } = await reader.read();
+                    if ( done ) {
+                        break;
+                    }
+
+                    buffer += decoder.decode( value, { stream: true } );
+                    const { events, remainder } = consumeSseBlocks( buffer );
+                    buffer = remainder;
+
+                    for ( const eventBlock of events ) {
+                        await processSseBlock( eventBlock, state, streamWriter );
+                        if ( state.finished ) {
+                            return;
+                        }
+                    }
                 }
 
-                buffer += decoder.decode( value, { stream: true } );
-                const { events, remainder } = consumeSseBlocks( buffer );
-                buffer = remainder;
-
+                buffer += decoder.decode();
+                const { events } = consumeSseBlocks( buffer );
                 for ( const eventBlock of events ) {
                     await processSseBlock( eventBlock, state, streamWriter );
                     if ( state.finished ) {
                         return;
                     }
                 }
-            }
 
-            buffer += decoder.decode();
-            const { events } = consumeSseBlocks( buffer );
-            for ( const eventBlock of events ) {
-                await processSseBlock( eventBlock, state, streamWriter );
-                if ( state.finished ) {
-                    return;
+                if ( !state.finished ) {
+                    await finishStream( state, streamWriter );
                 }
+            } catch ( error: any ) {
+                await sendErrorEvent( streamWriter, error instanceof Error ? error : new Error( String( error ) ), originalModel );
+            } finally {
+                reader.releaseLock();
+                closeController( controller );
             }
+        },
+        cancel() {
+            response.body?.cancel().catch( () => undefined );
+        },
+    } );
 
-            if ( !state.finished ) {
-                await finishStream( state, streamWriter );
-            }
-        } catch ( error: any ) {
-            await sendErrorEvent( streamWriter, error instanceof Error ? error : new Error( String( error ) ), originalModel );
-        } finally {
-            reader.releaseLock();
-        }
+    return new Response( readable, {
+        headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'Transfer-Encoding': 'chunked',
+            'X-Accel-Buffering': 'no',
+        },
     } );
 }
 
@@ -141,8 +165,6 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         textBlockOpen: false,
         lastFinishReason: null,
         finished: false,
-        sentEventHashes: new Set(),
-        sentToolUseIds: new Set(),
     };
 }
 
@@ -255,15 +277,6 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
             state.contentBlockIndex++;
         }
 
-        // If the upstream already emitted a tool_use with this id, try to reuse it
-        const incomingId = toolCall.id;
-        if ( incomingId && state.sentToolUseIds && state.sentToolUseIds.has( incomingId ) ) {
-            const existing = Array.from( state.currentToolCalls.values() ).find( ( c ) => c.id === incomingId );
-            if ( existing ) {
-                currentCall = existing;
-            }
-        }
-
         if ( !currentCall ) {
             const toolId = toolCall.id || generateUniqueToolId();
             currentCall = {
@@ -273,10 +286,7 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
                 blockIndex: state.contentBlockIndex + index,
             };
             state.currentToolCalls.set( index, currentCall );
-            // Only send a start event if we haven't already emitted this tool id
-            if ( !incomingId || !( state.sentToolUseIds && state.sentToolUseIds.has( incomingId ) ) ) {
-                await sendContentBlockStart( state, currentCall.blockIndex, 'tool_use', currentCall.name, streamWriter, currentCall.id );
-            }
+            await sendContentBlockStart( state, currentCall.blockIndex, 'tool_use', currentCall.name, streamWriter, currentCall.id );
         }
     }
 
@@ -448,23 +458,6 @@ async function sendErrorEvent( streamWriter: StreamWriter, error: Error, origina
 
 async function sendSseEvent( state: StreamState | undefined, streamWriter: StreamWriter, data: Record<string, any> ): Promise<void> {
     try {
-        if ( state ) {
-            try {
-                const key = JSON.stringify( data );
-                if ( state.sentEventHashes && state.sentEventHashes.has( key ) ) {
-                    return;
-                }
-                state.sentEventHashes?.add( key );
-
-                // track tool_use ids to prevent duplicate tool_use/tool_result pairing
-                if ( data?.type === 'content_block_start' && data?.content_block?.type === 'tool_use' && data?.content_block?.id ) {
-                    state.sentToolUseIds?.add( data.content_block.id );
-                }
-            } catch ( _ ) {
-                // ignore hashing errors and continue to send event
-            }
-        }
-
         const payload = `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n`;
         await streamWriter.write( payload );
     } catch ( err ) {

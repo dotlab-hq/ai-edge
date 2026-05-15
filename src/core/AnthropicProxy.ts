@@ -174,7 +174,7 @@ export class AnthropicProxy {
           const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
           const response = await fetchWithProxy( url, {
             method: 'POST',
-            headers: this.buildHeaders( config ),
+            headers: this.buildHeaders( config, openAIRequest.stream === true ),
             body: JSON.stringify( openAIRequest ),
           }, CONFIG.proxy );
 
@@ -365,12 +365,21 @@ export class AnthropicProxy {
     return index;
   }
 
-  private buildHeaders( config: OpenAIModelConfig ): Record<string, string> {
-    return {
+  private buildHeaders( config: OpenAIModelConfig, stream = false ): Record<string, string> {
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${config.apiKey}`,
       'User-Agent': 'ai-edge/1.0',
     };
+
+    if ( stream ) {
+      headers.Accept = 'text/event-stream';
+      headers['Accept-Encoding'] = 'identity';
+      headers.Connection = 'keep-alive';
+      headers['Cache-Control'] = 'no-cache';
+    }
+
+    return headers;
   }
 
   private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {

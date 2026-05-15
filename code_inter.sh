@@ -1,43 +1,15 @@
-curl -sS http://localhost:8888/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
+curl http://localhost:8888/anthropic/v1/messages \
+  -H "content-type: application/json" \
+  -H "x-api-key: YOUR_ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "gpt-4.1",
-    "tools": [
-      {
-        "type": "code_interpreter",
-        "container": {
-          "type": "auto"
-        }
-      }
-    ],
-    "input": [
-      {
-        "role": "system",
-        "content": "You are a helpful AI assistant."
-      },
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "stream": true,
+    "messages": [
       {
         "role": "user",
-        "content": "Solve the equation 3x + 11 = 14"
+        "content": "search the web!!! for modis latest visit and tell me where he went  latest"
       }
     ]
-  }' | bun -e '
-const input = await new Response( Bun.stdin ).text();
-
-try {
-  const payload = JSON.parse( input );
-  const message = payload?.output?.find( ( item ) => item?.type === "message" );
-  const outputText = message?.content?.find( ( block ) => block?.type === "output_text" )?.text;
-
-  if ( typeof outputText === "string" && outputText.length > 0 ) {
-    process.stdout.write( outputText.trim() + "\n" );
-  } else {
-    process.stdout.write( "No assistant text found.\n" );
-  }
-} catch ( error ) {
-  process.stdout.write( input );
-  if ( !input.endsWith( "\n" ) ) {
-    process.stdout.write( "\n" );
-  }
-}
-'
+  }'
