@@ -97,6 +97,29 @@ export async function generateTemplate(): Promise<string> {
 
   // Optional: Built-in tools (web search, code interpreter)
   // "tools": {
+  //   "webSearch": {
+  //     "defaults": {
+  //       "maxResults": 6,
+  //       "expandQueries": true,
+  //       "maxExpandedQueries": 2,
+  //       "parallelQueries": 2,
+  //       "softTimeoutMs": 8000,
+  //       "providerTimeoutMs": 7000
+  //     },
+  //     "tools": [
+  //       {
+  //         "type": "tavily",
+  //         "apiKey": "\${TAVILY_API_KEY}",
+  //         "timeoutMs": 7000,
+  //         "options": {
+  //           "searchDepth": "basic",
+  //           "includeRawContent": false,
+  //           "includeAnswer": true,
+  //           "maxResults": 6
+  //         }
+  //       }
+  //     ]
+  //   },
   //   "codeInterpreter": {
   //     "type": "daytona",
   //     "apiKey": "\${DAYTONA_API_KEY}",

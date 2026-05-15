@@ -63,6 +63,7 @@ export class AnthropicProxy {
 
     const body = webSearchContext.body;
     const requestedModel = body.model;
+    const hadToolSearchRequest = this.hasAnthropicToolSearchRequest( body );
     let lastFailure: { status: number; payload: any } | null = null;
 
     if ( !requestedModel || typeof requestedModel !== 'string' ) {
@@ -231,7 +232,8 @@ export class AnthropicProxy {
             };
 
           const anthropicResponse = convertOpenAIResponseToAnthropic( normalizedResponse, requestedModel );
-          const responseWithWebSearch = this.webSearchHandler.attachAnthropicWebSearchMetadata( anthropicResponse, webSearchContext.searchResponse );
+          const responseWithToolSearch = this.attachAnthropicToolSearchUsage( anthropicResponse, hadToolSearchRequest );
+          const responseWithWebSearch = this.webSearchHandler.attachAnthropicWebSearchMetadata( responseWithToolSearch, webSearchContext.searchResponse );
           return c.json( this.attachUsageIfMissing( endpoint, body, responseWithWebSearch ), response.status as any );
         } catch ( error: any ) {
           lastFailure = {
@@ -246,6 +248,7 @@ export class AnthropicProxy {
           console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
           continue;
         }
+
       }
     }
 
@@ -274,6 +277,34 @@ export class AnthropicProxy {
       },
       501
     );
+  }
+
+  private hasAnthropicToolSearchRequest( body: any ): boolean {
+    const tools = Array.isArray( body?.tools ) ? body.tools : [];
+    return tools.some( ( tool: any ) =>
+      ( typeof tool?.type === 'string' && /^tool_search_tool_(regex|bm25)_\d+$/.test( tool.type ) )
+      || ( typeof tool?.name === 'string' && /^(tool_search_tool_regex|tool_search_tool_bm25)$/.test( tool.name ) )
+    );
+  }
+
+  private attachAnthropicToolSearchUsage( payload: any, enabled: boolean ): any {
+    if ( !enabled || !payload || typeof payload !== 'object' || Array.isArray( payload ) ) {
+      return payload;
+    }
+
+    const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage : {};
+    const serverToolUse = usage.server_tool_use && typeof usage.server_tool_use === 'object' ? usage.server_tool_use : {};
+
+    return {
+      ...payload,
+      usage: {
+        ...usage,
+        server_tool_use: {
+          ...serverToolUse,
+          tool_search_requests: ( serverToolUse.tool_search_requests ?? 0 ) + 1,
+        },
+      },
+    };
   }
 
   private getBackendsForModel( modelName: string ): OpenAIModelConfig[] {
@@ -404,6 +435,10 @@ export class AnthropicProxy {
   }
 
   private withReasoningEffort( openAIRequest: any, sourceBody: any, config: OpenAIModelConfig, selectedModel: string ): any {
+    if ( !this.isReasoningConfiguredForModel( config, selectedModel ) ) {
+      return this.stripReasoningFields( openAIRequest );
+    }
+
     const effort = this.resolveReasoningEffort( sourceBody, config, selectedModel );
     if ( !effort || effort === 'none' ) {
       return openAIRequest;
@@ -416,6 +451,10 @@ export class AnthropicProxy {
   }
 
   private resolveReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): ReasoningEffort | undefined {
+    if ( !this.isReasoningConfiguredForModel( config, selectedModel ) ) {
+      return undefined;
+    }
+
     if ( typeof body?.reasoning_effort === 'string' ) {
       return body.reasoning_effort as ReasoningEffort;
     }
@@ -437,7 +476,33 @@ export class AnthropicProxy {
       return modelEntry.default_reasoning;
     }
 
-    return config.default_reasoning ?? 'medium';
+    return config.default_reasoning;
+  }
+
+  private isReasoningConfiguredForModel( config: OpenAIModelConfig, selectedModel: string ): boolean {
+    const hasProviderReasoning = Object.prototype.hasOwnProperty.call( config, 'reasoning_efforts' )
+      || Object.prototype.hasOwnProperty.call( config, 'default_reasoning' );
+    if ( hasProviderReasoning ) {
+      return true;
+    }
+
+    const modelEntry = config.models.find( model => {
+      const modelName = typeof model === 'string' ? model : model.model;
+      return stripFreeModifier( modelName ).normalizedId === stripFreeModifier( selectedModel ).normalizedId;
+    } );
+
+    return !!modelEntry
+      && typeof modelEntry === 'object'
+      && ( Object.prototype.hasOwnProperty.call( modelEntry, 'reasoning_efforts' )
+        || Object.prototype.hasOwnProperty.call( modelEntry, 'default_reasoning' ) );
+  }
+
+  private stripReasoningFields(body: any): any {
+    if ( !body || typeof body !== 'object' ) {
+      return body;
+    }
+    const { reasoning_effort, reasoning, thinking, include_reasoning, output_reasoning, ...rest } = body;
+    return rest;
   }
 
   private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {

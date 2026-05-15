@@ -4,12 +4,11 @@ curl http://localhost:8888/anthropic/v1/messages \
   -H "anthropic-version: 2023-06-01" \
   -d '{
     "model": "claude-sonnet-4-20250514",
-    "max_tokens": 1024,
-    "stream": true,
+        "stream": true,
     "messages": [
       {
         "role": "user",
-        "content": "search the web!!! for modis latest visit and tell me where he went  latest"
+        "content": " modis latest visit and tell me where he went  latest"
       }
     ]
   }'

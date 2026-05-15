@@ -13,6 +13,7 @@ export class WebSearchHandler {
     searchResponse?: WebSearchResponse;
     errorResponse?: { status: number; body: any };
   }> {
+    const startedAt = Date.now();
     if (!this.shouldUseAnthropicWebSearch(body)) {
       return { body };
     }
@@ -48,9 +49,16 @@ export class WebSearchHandler {
       };
     }
 
+    const searchDefaults = CONFIG.tools?.webSearch?.defaults;
     const searchResponse = await this.webSearchManager.search(query, {
-      maxResults: 8,
+      maxResults: searchDefaults?.maxResults ?? 6,
+      expand: searchDefaults?.expandQueries,
+      maxExpandedQueries: searchDefaults?.maxExpandedQueries,
+      parallelQueries: searchDefaults?.parallelQueries,
+      softTimeoutMs: searchDefaults?.softTimeoutMs,
+      providerTimeoutMs: searchDefaults?.providerTimeoutMs,
     });
+    console.info(`[web-search] anthropic_prepare durationMs=${Date.now() - startedAt} provider=${searchResponse.provider} cached=${searchResponse.cached} citations=${searchResponse.citations.length}`);
     return {
       body: this.injectAnthropicWebSearchContext(body, searchResponse),
       searchResponse,

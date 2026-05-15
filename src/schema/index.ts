@@ -22,15 +22,12 @@ const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
 
 const ReasoningConfigFields = {
-  reasoning_efforts: z.array( ReasoningEffortSchema ).min( 1, 'reasoning_efforts must contain at least one effort' ).optional().describe( 'Reasoning effort levels supported by this provider or model. Defaults to ["low", "medium", "high"] when omitted' ),
-  default_reasoning: ReasoningEffortSchema.optional().describe( 'Default reasoning effort. Must be one of reasoning_efforts and defaults to "medium" when omitted' ),
+  reasoning_efforts: z.array( ReasoningEffortSchema ).min( 1, 'reasoning_efforts must contain at least one effort' ).optional().describe( 'Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.' ),
+  default_reasoning: ReasoningEffortSchema.optional().describe( 'Default reasoning effort used only when reasoning is explicitly configured for this provider or model.' ),
 }
 
 function validateReasoningConfig( val: { reasoning_efforts?: string[]; default_reasoning?: string }, ctx: z.RefinementCtx ) {
-  const efforts = val.reasoning_efforts ?? ['low', 'medium', 'high']
-  const defaultReasoning = val.default_reasoning ?? 'medium'
-
-  if ( !efforts.includes( defaultReasoning ) ) {
+  if ( val.default_reasoning && Array.isArray( val.reasoning_efforts ) && !val.reasoning_efforts.includes( val.default_reasoning ) ) {
     ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['default_reasoning'], message: 'default_reasoning must be one of reasoning_efforts' } )
   }
 }
@@ -130,14 +127,33 @@ const WebSearchRateLimitSchema = z.object( {
   requestsPerMonth: z.number( { error: 'requestsPerMonth must be a number' } ).int( 'requestsPerMonth must be an integer' ).positive( 'requestsPerMonth must be > 0' ).optional(),
 } ).optional()
 
+const WebSearchDefaultsSchema = z.object( {
+  maxResults: z.number( { error: 'maxResults must be a number' } ).int( 'maxResults must be an integer' ).positive( 'maxResults must be > 0' ).optional(),
+  expandQueries: z.boolean( { error: 'expandQueries must be a boolean' } ).optional(),
+  maxExpandedQueries: z.number( { error: 'maxExpandedQueries must be a number' } ).int( 'maxExpandedQueries must be an integer' ).positive( 'maxExpandedQueries must be > 0' ).optional(),
+  parallelQueries: z.number( { error: 'parallelQueries must be a number' } ).int( 'parallelQueries must be an integer' ).positive( 'parallelQueries must be > 0' ).optional(),
+  softTimeoutMs: z.number( { error: 'softTimeoutMs must be a number' } ).int( 'softTimeoutMs must be an integer' ).positive( 'softTimeoutMs must be > 0' ).optional(),
+  providerTimeoutMs: z.number( { error: 'providerTimeoutMs must be a number' } ).int( 'providerTimeoutMs must be an integer' ).positive( 'providerTimeoutMs must be > 0' ).optional(),
+} ).strict().optional()
+
+const WebSearchProviderOptionsSchema = z.object( {
+  maxResults: z.number( { error: 'maxResults must be a number' } ).int( 'maxResults must be an integer' ).positive( 'maxResults must be > 0' ).optional(),
+  searchDepth: z.enum( ['basic', 'advanced'] ).optional(),
+  includeRawContent: z.boolean( { error: 'includeRawContent must be a boolean' } ).optional(),
+  includeAnswer: z.boolean( { error: 'includeAnswer must be a boolean' } ).optional(),
+} ).strict().optional()
+
 const WebSearchToolSchema = z.object( {
   type: z.enum( ['tavily', 'exa'] ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: WebSearchRateLimitSchema,
+  timeoutMs: z.number( { error: 'timeoutMs must be a number' } ).int( 'timeoutMs must be an integer' ).positive( 'timeoutMs must be > 0' ).optional(),
+  options: WebSearchProviderOptionsSchema,
 } )
 
 const WebSearchSchema = z.object( {
   tools: z.array( WebSearchToolSchema ).min( 1, 'tools.webSearch.tools must contain at least one provider' ),
+  defaults: WebSearchDefaultsSchema,
 } ).optional()
 
 const CodeInterpreterResourcesSchema = z.object( {

@@ -34,6 +34,10 @@ interface SearchOptions {
     maxResults?: number;
     topic?: 'general' | 'news' | 'finance';
     expand?: boolean;
+    maxExpandedQueries?: number;
+    parallelQueries?: number;
+    softTimeoutMs?: number;
+    providerTimeoutMs?: number;
 }
 
 interface SearchProvider {
@@ -57,14 +61,16 @@ const RATE_LIMIT_PREFIX = 'websearch:rate:';
 class TavilySearchAdapter implements SearchProvider {
     readonly type = 'tavily' as const;
     private readonly tool: TavilySearch;
+    private readonly maxResults: number;
 
-    constructor(apiKey: string) {
+    constructor(apiKey: string, options?: { maxResults?: number; searchDepth?: 'basic' | 'advanced'; includeRawContent?: boolean; includeAnswer?: boolean }) {
+        this.maxResults = clampInteger(options?.maxResults, 1, 10, 6);
         this.tool = new TavilySearch({
             tavilyApiKey: apiKey,
-            includeAnswer: true,
-            includeRawContent: 'text',
-            maxResults: 10,
-            searchDepth: 'advanced',
+            includeAnswer: options?.includeAnswer ?? true,
+            includeRawContent: options?.includeRawContent ? 'text' : false,
+            maxResults: this.maxResults,
+            searchDepth: options?.searchDepth ?? 'basic',
             includeFavicon: false,
             includeUsage: false,
         });
@@ -93,12 +99,14 @@ class TavilySearchAdapter implements SearchProvider {
 class ExaSearchAdapter implements SearchProvider {
     readonly type = 'exa' as const;
     private readonly tool: ExaSearchResults<{ text: true }>;
+    private readonly maxResults: number;
 
-    constructor(apiKey: string) {
+    constructor(apiKey: string, options?: { maxResults?: number }) {
+        this.maxResults = clampInteger(options?.maxResults, 1, 10, 6);
         this.tool = new ExaSearchResults({
             client: new Exa(apiKey),
             searchArgs: {
-                numResults: 10,
+                numResults: this.maxResults,
                 text: true,
             },
         });
@@ -162,11 +170,21 @@ function truncate(value: string, maxLength: number): string {
     return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return fallback;
+    }
+    const normalized = Math.trunc(value);
+    return Math.min(max, Math.max(min, normalized));
+}
+
 function buildCacheKey(query: string, options: SearchOptions): string {
     return `${SEARCH_CACHE_PREFIX}${JSON.stringify({
         q: query.trim().toLowerCase(),
         maxResults: options.maxResults ?? 5,
         topic: options.topic ?? 'general',
+        maxExpandedQueries: options.maxExpandedQueries ?? 2,
+        parallelQueries: options.parallelQueries ?? 2,
     })}`;
 }
 
@@ -194,6 +212,7 @@ function isCacheHitFresh(value: any): value is { expiresAt: number; payload: Omi
 
 export class WebSearchManager {
     private readonly providers = new Map<string, SearchProvider>();
+    private readonly defaultOptions = this.getDefaultOptions();
 
     isEnabled(): boolean {
         return (CONFIG.tools?.webSearch?.tools?.length ?? 0) > 0;
@@ -204,6 +223,7 @@ export class WebSearchManager {
     }
 
     async search(query: string, options: SearchOptions = {}): Promise<WebSearchResponse> {
+        const startedAt = Date.now();
         const normalizedQuery = query.trim();
         if (!normalizedQuery) {
             throw new Error('Search query is required');
@@ -214,28 +234,24 @@ export class WebSearchManager {
             throw new Error('Web search is not configured');
         }
 
-        const inferredTopic = options.topic ?? this.inferTopic(normalizedQuery);
-        const searchOptions = {
-            ...options,
-            topic: inferredTopic,
-        };
+        const searchOptions = this.resolveOptions(normalizedQuery, options);
 
         const expandedQueries = searchOptions.expand === false
             ? [normalizedQuery]
-            : this.buildSearchQueries(normalizedQuery, searchOptions);
+            : this.buildSearchQueries(normalizedQuery, searchOptions).slice(0, searchOptions.maxExpandedQueries ?? 2);
 
-        const responses: WebSearchResponse[] = [];
-        for (const expandedQuery of expandedQueries) {
-            responses.push(await this.searchSingle(expandedQuery, {
-                ...searchOptions,
-                expand: false,
-            }));
+        const responses = await this.searchExpandedQueries(expandedQueries, searchOptions);
+        if (!responses.length) {
+            throw new Error('Web search providers did not return results before timeout');
         }
 
-        return this.mergeResponses(normalizedQuery, responses);
+        const merged = this.mergeResponses(normalizedQuery, responses);
+        console.info(`[web-search] complete query="${normalizedQuery}" durationMs=${Date.now() - startedAt} expandedQueries=${expandedQueries.length} returnedResults=${merged.results.length} cached=${merged.cached}`);
+        return merged;
     }
 
     private async searchSingle(query: string, options: SearchOptions): Promise<WebSearchResponse> {
+        const startedAt = Date.now();
         const normalizedQuery = query.trim();
         const configuredTools = this.getConfiguredTools();
         const orderedTools = await this.getAvailableTools(configuredTools);
@@ -244,6 +260,7 @@ export class WebSearchManager {
         const cacheKey = buildCacheKey(normalizedQuery, options);
         const cached = await CACHE.getKey<any>(cacheKey);
         if (isCacheHitFresh(cached)) {
+            console.info(`[web-search] cache_hit query="${normalizedQuery}" durationMs=${Date.now() - startedAt}`);
             return {
                 ...cached.payload,
                 cached: true,
@@ -254,17 +271,25 @@ export class WebSearchManager {
             try {
                 await this.consumeRateLimit(tool);
                 const provider = this.getOrCreateProvider(tool);
-                const response = await provider.search(normalizedQuery, options);
+                const timeoutMs = this.getProviderTimeout(tool, options);
+                const response = await this.withTimeout(
+                    provider.search(normalizedQuery, options),
+                    timeoutMs,
+                    `Web search provider timeout for ${tool.type}`
+                );
                 await CACHE.setKey(cacheKey, {
                     expiresAt: Date.now() + DEFAULT_CACHE_TTL_MS,
                     payload: response,
                 });
+                console.info(`[web-search] provider_success query="${normalizedQuery}" provider=${tool.type} durationMs=${Date.now() - startedAt} timeoutMs=${timeoutMs}`);
                 return {
                     ...response,
                     cached: false,
                 };
             } catch (error) {
                 lastError = error;
+                const message = error instanceof Error ? error.message : String(error);
+                console.warn(`[web-search] provider_error query="${normalizedQuery}" provider=${tool.type} durationMs=${Date.now() - startedAt} error="${message}"`);
             }
         }
 
@@ -282,7 +307,7 @@ export class WebSearchManager {
             }
         }
 
-        return Array.from(new Set(queries)).slice(0, 4);
+        return Array.from(new Set(queries)).slice(0, Math.max(1, options.maxExpandedQueries ?? 2));
     }
 
     private inferTopic(query: string): SearchOptions['topic'] {
@@ -334,15 +359,22 @@ export class WebSearchManager {
     }
 
     private getOrCreateProvider(tool: WebSearchToolConfig): SearchProvider {
-        const key = `${tool.type}:${tool.apiKey}`;
+        const key = `${tool.type}:${tool.apiKey}:${JSON.stringify(tool.options ?? {})}`;
         const existing = this.providers.get(key);
         if (existing) {
             return existing;
         }
 
         const provider = tool.type === 'tavily'
-            ? new TavilySearchAdapter(tool.apiKey)
-            : new ExaSearchAdapter(tool.apiKey);
+            ? new TavilySearchAdapter(tool.apiKey, {
+                maxResults: tool.options?.maxResults,
+                searchDepth: tool.options?.searchDepth,
+                includeRawContent: tool.options?.includeRawContent,
+                includeAnswer: tool.options?.includeAnswer,
+            })
+            : new ExaSearchAdapter(tool.apiKey, {
+                maxResults: tool.options?.maxResults,
+            });
 
         this.providers.set(key, provider);
         return provider;
@@ -449,6 +481,97 @@ export class WebSearchManager {
         }
 
         return record;
+    }
+
+    private getDefaultOptions(): Required<Pick<SearchOptions, 'maxResults' | 'expand' | 'maxExpandedQueries' | 'parallelQueries' | 'softTimeoutMs' | 'providerTimeoutMs'>> {
+        const defaults = CONFIG.tools?.webSearch?.defaults;
+        return {
+            maxResults: clampInteger(defaults?.maxResults, 1, 12, 6),
+            expand: defaults?.expandQueries ?? true,
+            maxExpandedQueries: clampInteger(defaults?.maxExpandedQueries, 1, 6, 2),
+            parallelQueries: clampInteger(defaults?.parallelQueries, 1, 4, 2),
+            softTimeoutMs: clampInteger(defaults?.softTimeoutMs, 1000, 30000, 8000),
+            providerTimeoutMs: clampInteger(defaults?.providerTimeoutMs, 500, 30000, 7000),
+        };
+    }
+
+    private resolveOptions(query: string, options: SearchOptions): SearchOptions {
+        return {
+            maxResults: clampInteger(options.maxResults, 1, 12, this.defaultOptions.maxResults),
+            topic: options.topic ?? this.inferTopic(query),
+            expand: options.expand ?? this.defaultOptions.expand,
+            maxExpandedQueries: clampInteger(options.maxExpandedQueries, 1, 6, this.defaultOptions.maxExpandedQueries),
+            parallelQueries: clampInteger(options.parallelQueries, 1, 4, this.defaultOptions.parallelQueries),
+            softTimeoutMs: clampInteger(options.softTimeoutMs, 1000, 30000, this.defaultOptions.softTimeoutMs),
+            providerTimeoutMs: clampInteger(options.providerTimeoutMs, 500, 30000, this.defaultOptions.providerTimeoutMs),
+        };
+    }
+
+    private async searchExpandedQueries(queries: string[], options: SearchOptions): Promise<WebSearchResponse[]> {
+        const responses: WebSearchResponse[] = [];
+        const softTimeoutMs = options.softTimeoutMs ?? this.defaultOptions.softTimeoutMs;
+        const deadline = Date.now() + softTimeoutMs;
+        const concurrency = Math.min(queries.length, options.parallelQueries ?? this.defaultOptions.parallelQueries);
+        let nextIndex = 0;
+        const errors: unknown[] = [];
+
+        const runWorker = async () => {
+            while (nextIndex < queries.length && Date.now() < deadline) {
+                const query = queries[nextIndex];
+                nextIndex += 1;
+                if (!query) {
+                    continue;
+                }
+
+                const remaining = deadline - Date.now();
+                if (remaining <= 0) {
+                    return;
+                }
+
+                try {
+                    const response = await this.withTimeout(
+                        this.searchSingle(query, { ...options, expand: false }),
+                        remaining,
+                        `Web search query timed out for "${query}"`
+                    );
+                    responses.push(response);
+                } catch (error) {
+                    errors.push(error);
+                }
+            }
+        };
+
+        await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+
+        if (!responses.length && errors.length > 0) {
+            throw errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]));
+        }
+
+        return responses;
+    }
+
+    private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+        if (timeoutMs <= 0) {
+            throw new Error(message);
+        }
+
+        return await new Promise<T>((resolve, reject) => {
+            const timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+            promise.then(
+                (value) => {
+                    clearTimeout(timeoutId);
+                    resolve(value);
+                },
+                (error) => {
+                    clearTimeout(timeoutId);
+                    reject(error);
+                }
+            );
+        });
+    }
+
+    private getProviderTimeout(tool: WebSearchToolConfig, options: SearchOptions): number {
+        return clampInteger(tool.timeoutMs, 500, 30000, options.providerTimeoutMs ?? this.defaultOptions.providerTimeoutMs);
     }
 }
 

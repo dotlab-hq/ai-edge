@@ -159,6 +159,51 @@ Configure a Daytona sandbox to handle OpenAI `code_interpreter` and Anthropic `c
 
 `code_interpreter` is accepted as an alias for `codeInterpreter`.
 
+## Web Search Performance Tuning
+
+Configure built-in web search defaults to keep latency bounded:
+
+```jsonc
+{
+  "tools": {
+    "webSearch": {
+      "defaults": {
+        "maxResults": 6,
+        "expandQueries": true,
+        "maxExpandedQueries": 2,
+        "parallelQueries": 2,
+        "softTimeoutMs": 8000,
+        "providerTimeoutMs": 7000
+      },
+      "tools": [
+        {
+          "type": "tavily",
+          "apiKey": "${TAVILY_API_KEY}",
+          "timeoutMs": 7000,
+          "options": {
+            "searchDepth": "basic",
+            "includeRawContent": false,
+            "includeAnswer": true,
+            "maxResults": 6
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Recommended for faster responses:
+- Keep `maxExpandedQueries` at 1-2 for most prompts.
+- Use `searchDepth: "basic"` and disable raw content unless needed.
+- Set provider timeout lower than total `softTimeoutMs` so partial results can return sooner.
+
+## Tool Search Compatibility
+
+- OpenAI `tool_search` + `defer_loading` passthrough is supported on `POST /v1/responses`.
+- For `POST /v1/chat/completions`, `tool_search` tools and `defer_loading` flags are removed for upstream compatibility.
+- Anthropic `tool_search_tool_*` uses a proxy-side compatibility implementation: server search tools are removed, deferred tools are eagerly exposed as normal callable tools, and usage includes `server_tool_use.tool_search_requests`.
+
 ## API Endpoints
 
 ### Get Cache Status

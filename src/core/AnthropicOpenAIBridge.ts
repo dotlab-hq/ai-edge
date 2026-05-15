@@ -1,4 +1,5 @@
 import type { Context } from 'hono';
+import { stream } from 'hono/streaming';
 import {
     convertRequestToOpenAI,
     convertResponseToAnthropic,
@@ -35,6 +36,7 @@ interface StreamState {
     hasStarted: boolean;
     textContent: string;
     textBlockOpen: boolean;
+    openBlockTypes: Map<number, 'text' | 'tool_use' | 'server_tool_use'>;
     lastFinishReason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null;
     finished: boolean;
 }
@@ -62,86 +64,59 @@ export async function streamOpenAIResponseAsAnthropic(
     originalModel: string,
     initialContentBlocks: Array<Record<string, any>> = []
 ): Promise<Response> {
-    void c;
-    const encoder = new TextEncoder();
-    let closed = false;
-    const closeController = ( controller: ReadableStreamDefaultController<Uint8Array> ) => {
-        if ( closed ) {
+    c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+    c.header( 'Cache-Control', 'no-cache, no-transform' );
+    c.header( 'Connection', 'keep-alive' );
+    c.header( 'X-Accel-Buffering', 'no' );
+
+    return stream( c, async ( streamWriter ) => {
+        await streamWriter.write( ': stream-start\n\n' );
+        const reader = response.body?.getReader();
+        if ( !reader ) {
+            await sendErrorEvent( streamWriter, new Error( 'Upstream response did not include a stream' ), originalModel );
             return;
         }
-        closed = true;
-        controller.close();
-    };
-    const readable = new ReadableStream<Uint8Array>( {
-        async start( controller ) {
-            const streamWriter: StreamWriter = {
-                write: async ( chunk: string ) => {
-                    controller.enqueue( encoder.encode( chunk ) );
-                },
-            };
-            await streamWriter.write( ': stream-start\n\n' );
-            const reader = response.body?.getReader();
-            if ( !reader ) {
-                await sendErrorEvent( streamWriter, new Error( 'Upstream response did not include a stream' ), originalModel );
-                closeController( controller );
-                return;
-            }
 
-            const decoder = new TextDecoder();
-            const state = createStreamState( originalModel, initialContentBlocks );
-            let buffer = '';
+        const decoder = new TextDecoder();
+        const state = createStreamState( originalModel, initialContentBlocks );
+        let buffer = '';
 
-            try {
-                while ( true ) {
-                    const { done, value } = await reader.read();
-                    if ( done ) {
-                        break;
-                    }
-
-                    buffer += decoder.decode( value, { stream: true } );
-                    const { events, remainder } = consumeSseBlocks( buffer );
-                    buffer = remainder;
-
-                    for ( const eventBlock of events ) {
-                        await processSseBlock( eventBlock, state, streamWriter );
-                        if ( state.finished ) {
-                            return;
-                        }
-                    }
+        try {
+            while ( true ) {
+                const { done, value } = await reader.read();
+                if ( done ) {
+                    break;
                 }
 
-                buffer += decoder.decode();
-                const { events } = consumeSseBlocks( buffer );
+                buffer += decoder.decode( value, { stream: true } );
+                const { events, remainder } = consumeSseBlocks( buffer );
+                buffer = remainder;
+
                 for ( const eventBlock of events ) {
                     await processSseBlock( eventBlock, state, streamWriter );
                     if ( state.finished ) {
                         return;
                     }
                 }
-
-                if ( !state.finished ) {
-                    await finishStream( state, streamWriter );
-                }
-            } catch ( error: any ) {
-                await sendErrorEvent( streamWriter, error instanceof Error ? error : new Error( String( error ) ), originalModel );
-            } finally {
-                reader.releaseLock();
-                closeController( controller );
             }
-        },
-        cancel() {
-            response.body?.cancel().catch( () => undefined );
-        },
-    } );
 
-    return new Response( readable, {
-        headers: {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'Transfer-Encoding': 'chunked',
-            'X-Accel-Buffering': 'no',
-        },
+            buffer += decoder.decode();
+            const { events } = consumeSseBlocks( buffer );
+            for ( const eventBlock of events ) {
+                await processSseBlock( eventBlock, state, streamWriter );
+                if ( state.finished ) {
+                    return;
+                }
+            }
+
+            if ( !state.finished ) {
+                await finishStream( state, streamWriter );
+            }
+        } catch ( error: any ) {
+            await sendErrorEvent( streamWriter, error instanceof Error ? error : new Error( String( error ) ), originalModel );
+        } finally {
+            reader.releaseLock();
+        }
     } );
 }
 
@@ -163,6 +138,7 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         hasStarted: false,
         textContent: '',
         textBlockOpen: false,
+        openBlockTypes: new Map(),
         lastFinishReason: null,
         finished: false,
     };
@@ -234,7 +210,14 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
 
     const delta = choice.delta;
     if ( delta.content ) {
-        if ( !state.textBlockOpen ) {
+        const existingType = state.openBlockTypes.get( state.contentBlockIndex );
+        if ( !state.textBlockOpen || ( existingType && existingType !== 'text' ) ) {
+            if ( state.textBlockOpen && existingType && existingType !== 'text' ) {
+                await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+                state.textBlockOpen = false;
+                state.textContent = '';
+                state.contentBlockIndex++;
+            }
             await sendContentBlockStart( state, state.contentBlockIndex, 'text', '', streamWriter );
             state.textBlockOpen = true;
         }
@@ -261,6 +244,11 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
 
         for ( const toolCall of state.currentToolCalls.values() ) {
             await sendContentBlockStop( state, toolCall.blockIndex, streamWriter );
+        }
+        if ( state.currentToolCalls.size > 0 ) {
+            const maxToolIndex = Math.max( ...Array.from( state.currentToolCalls.values() ).map( ( toolCall ) => toolCall.blockIndex ) );
+            state.contentBlockIndex = Math.max( state.contentBlockIndex, maxToolIndex + 1 );
+            state.currentToolCalls.clear();
         }
     }
 }
@@ -349,6 +337,10 @@ async function sendContentBlockStart(
         index,
         content_block: contentBlock,
     } );
+
+    if ( state ) {
+        state.openBlockTypes.set( index, type );
+    }
 }
 
 async function emitInitialContentBlocks( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
@@ -364,6 +356,10 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
             index,
             content_block: block,
         } );
+
+        if ( block?.type === 'text' || block?.type === 'tool_use' || block?.type === 'server_tool_use' ) {
+            state.openBlockTypes.set( index, block.type );
+        }
 
         if ( block?.type === 'server_tool_use' && block?.input && typeof block.input === 'object' ) {
             await sendSseEvent( state, streamWriter, {
@@ -384,6 +380,10 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
 }
 
 async function sendTextDelta( state: StreamState | undefined, index: number, text: string, streamWriter: StreamWriter ): Promise<void> {
+    if ( state && state.openBlockTypes.get( index ) !== 'text' ) {
+        return;
+    }
+
     await sendSseEvent( state, streamWriter, {
         type: 'content_block_delta',
         index,
@@ -395,6 +395,13 @@ async function sendTextDelta( state: StreamState | undefined, index: number, tex
 }
 
 async function sendInputJsonDelta( state: StreamState | undefined, index: number, partialJson: string, streamWriter: StreamWriter ): Promise<void> {
+    if ( state ) {
+        const blockType = state.openBlockTypes.get( index );
+        if ( blockType !== 'tool_use' && blockType !== 'server_tool_use' ) {
+            return;
+        }
+    }
+
     await sendSseEvent( state, streamWriter, {
         type: 'content_block_delta',
         index,
@@ -410,6 +417,10 @@ async function sendContentBlockStop( state: StreamState | undefined, index: numb
         type: 'content_block_stop',
         index,
     } );
+
+    if ( state ) {
+        state.openBlockTypes.delete( index );
+    }
 }
 
 async function finishStream( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
@@ -521,6 +532,8 @@ function normalizeAnthropicRequest( anthropicRequest: AnthropicMessageRequest ):
     if ( !normalizedTools || normalizedTools.length === 0 ) {
         delete ( normalizedRequest as Partial<AnthropicMessageRequest> ).tools;
         delete ( normalizedRequest as Partial<AnthropicMessageRequest> ).tool_choice;
+    } else if ( toolChoiceTargetsMissingTool( normalizedRequest.tool_choice, normalizedTools ) ) {
+        delete ( normalizedRequest as Partial<AnthropicMessageRequest> ).tool_choice;
     }
 
     return normalizedRequest;
@@ -597,8 +610,16 @@ function normalizeAnthropicTools( tools: AnthropicMessageRequest['tools'] ): Ant
         return undefined;
     }
 
+    const hasToolSearchTool = tools.some( ( tool: any ) => isAnthropicToolSearchTool( tool ) );
+
     const normalizedTools = tools.flatMap( ( tool: any ) => {
         if ( !tool || typeof tool !== 'object' ) {
+            return [];
+        }
+
+        if ( hasToolSearchTool && isAnthropicToolSearchTool( tool ) ) {
+            // Custom proxy-side behavior for Anthropic tool-search: eagerly expose deferred tools
+            // and remove server-only tool_search tools that are not OpenAI-convertible.
             return [];
         }
 
@@ -625,6 +646,26 @@ function normalizeAnthropicTools( tools: AnthropicMessageRequest['tools'] ): Ant
     } );
 
     return normalizedTools.length > 0 ? normalizedTools : undefined;
+}
+
+function toolChoiceTargetsMissingTool( toolChoice: AnthropicMessageRequest['tool_choice'], tools: NonNullable<AnthropicMessageRequest['tools']> ): boolean {
+    if ( !toolChoice || toolChoice.type !== 'tool' || typeof toolChoice.name !== 'string' || !toolChoice.name ) {
+        return false;
+    }
+
+    return !tools.some( ( tool ) => tool?.name === toolChoice.name );
+}
+
+function isAnthropicToolSearchTool( tool: Record<string, any> ): boolean {
+    if ( typeof tool?.type === 'string' && /^tool_search_tool_(regex|bm25)_\d+$/.test( tool.type ) ) {
+        return true;
+    }
+
+    if ( typeof tool?.name === 'string' && /^(tool_search_tool_regex|tool_search_tool_bm25)$/.test( tool.name ) ) {
+        return true;
+    }
+
+    return false;
 }
 
 function normalizeJsonSchemaObject( schema: Record<string, any> ): { type: 'object'; properties: Record<string, unknown>; required?: string[] } {

@@ -102,16 +102,27 @@ function isModelObject( modelEntry: ConfigModelEntry | undefined ): modelEntry i
     return typeof modelEntry === 'object' && modelEntry !== null;
 }
 
-function getReasoningConfig( config: ProviderConfig, modelEntry?: ConfigModelEntry ): { efforts: ReasoningEffort[]; defaultReasoning: ReasoningEffort } {
+function hasReasoningConfigured(value: { reasoning_efforts?: ReasoningEffort[]; default_reasoning?: ReasoningEffort }): boolean {
+    return Object.prototype.hasOwnProperty.call(value, 'reasoning_efforts')
+        || Object.prototype.hasOwnProperty.call(value, 'default_reasoning');
+}
+
+function getReasoningConfig(config: ProviderConfig, modelEntry?: ConfigModelEntry): { efforts: ReasoningEffort[]; defaultReasoning?: ReasoningEffort } {
     const source = isModelObject( modelEntry ) && ( modelEntry.reasoning_efforts || modelEntry.default_reasoning )
         ? modelEntry
         : config;
+    if ( !hasReasoningConfigured( source ) ) {
+        return {
+            efforts: [],
+            defaultReasoning: undefined,
+        };
+    }
     const efforts = ( source.reasoning_efforts?.length ? source.reasoning_efforts : DEFAULT_REASONING_EFFORTS ) as ReasoningEffort[];
-    const defaultReasoning = ( source.default_reasoning ?? 'medium' ) as ReasoningEffort;
+    const defaultReasoning = source.default_reasoning as ReasoningEffort | undefined;
 
     return {
         efforts,
-        defaultReasoning: efforts.includes( defaultReasoning ) ? defaultReasoning : efforts[0] ?? 'medium',
+        defaultReasoning: defaultReasoning && efforts.includes( defaultReasoning ) ? defaultReasoning : efforts[0],
     };
 }
 
@@ -149,7 +160,7 @@ function getReasoningLevels( efforts: ReasoningEffort[] ): Array<Exclude<Reasoni
     return efforts.filter( ( effort ): effort is Exclude<ReasoningEffort, 'none'> => effort !== 'none' );
 }
 
-function getConfigModelMetas( config: ProviderConfig ): Array<{ normalizedId: string; id: string; isFree: boolean; order: number; reasoningEfforts: ReasoningEffort[]; defaultReasoning: ReasoningEffort }> {
+function getConfigModelMetas( config: ProviderConfig ): Array<{ normalizedId: string; id: string; isFree: boolean; order: number; reasoningEfforts: ReasoningEffort[]; defaultReasoning?: ReasoningEffort }> {
     return config.models.map( ( modelEntry, order ) => {
         const rawId = typeof modelEntry === 'string' ? modelEntry : modelEntry.model;
         const { normalizedId, isFree } = stripFreeModifier( rawId );

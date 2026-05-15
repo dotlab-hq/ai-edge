@@ -105,6 +105,35 @@
                       }
                     },
                     "additionalProperties": false
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "options": {
+                    "type": "object",
+                    "properties": {
+                      "maxResults": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "searchDepth": {
+                        "type": "string",
+                        "enum": [
+                          "basic",
+                          "advanced"
+                        ]
+                      },
+                      "includeRawContent": {
+                        "type": "boolean"
+                      },
+                      "includeAnswer": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -113,6 +142,40 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "defaults": {
+              "type": "object",
+              "properties": {
+                "maxResults": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "expandQueries": {
+                  "type": "boolean"
+                },
+                "maxExpandedQueries": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "parallelQueries": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "softTimeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "providerTimeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "additionalProperties": false
             }
           },
           "required": [
@@ -275,7 +338,7 @@
                           "additionalProperties": false
                         },
                         "reasoning_efforts": {
-                          "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                          "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                           "minItems": 1,
                           "type": "array",
                           "items": {
@@ -291,7 +354,7 @@
                           }
                         },
                         "default_reasoning": {
-                          "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                          "description": "Default reasoning effort used only when reasoning is explicitly configured for this provider or model.",
                           "type": "string",
                           "enum": [
                             "none",
@@ -376,7 +439,7 @@
                 "type": "boolean"
               },
               "reasoning_efforts": {
-                "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                 "minItems": 1,
                 "type": "array",
                 "items": {
@@ -392,7 +455,7 @@
                 }
               },
               "default_reasoning": {
-                "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                "description": "Default reasoning effort used only when reasoning is explicitly configured for this provider or model.",
                 "type": "string",
                 "enum": [
                   "none",
@@ -469,7 +532,7 @@
                           "additionalProperties": false
                         },
                         "reasoning_efforts": {
-                          "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                          "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                           "minItems": 1,
                           "type": "array",
                           "items": {
@@ -485,7 +548,7 @@
                           }
                         },
                         "default_reasoning": {
-                          "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                          "description": "Default reasoning effort used only when reasoning is explicitly configured for this provider or model.",
                           "type": "string",
                           "enum": [
                             "none",
@@ -545,7 +608,7 @@
                 "type": "boolean"
               },
               "reasoning_efforts": {
-                "description": "Reasoning effort levels supported by this provider or model. Defaults to [\"low\", \"medium\", \"high\"] when omitted",
+                "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                 "minItems": 1,
                 "type": "array",
                 "items": {
@@ -561,7 +624,7 @@
                 }
               },
               "default_reasoning": {
-                "description": "Default reasoning effort. Must be one of reasoning_efforts and defaults to \"medium\" when omitted",
+                "description": "Default reasoning effort used only when reasoning is explicitly configured for this provider or model.",
                 "type": "string",
                 "enum": [
                   "none",

@@ -90,12 +90,90 @@ export class OpenAIProxy {
 
     private async handleOpenAIRequest( c: Context, endpoint: string ) {
         const rawBody = await c.req.json().catch( () => ( {} ) );
+        const normalizedBody = this.normalizeToolSearchForEndpoint( rawBody, endpoint );
 
-        if ( this.shouldUseOpenAICodeInterpreter( rawBody ) ) {
-            return this.proxyCodeInterpreterRequest( c, endpoint, rawBody );
+        if ( this.shouldUseOpenAICodeInterpreter( normalizedBody ) ) {
+            return this.proxyCodeInterpreterRequest( c, endpoint, normalizedBody );
         }
 
-        return this.proxyRequest( c, endpoint, 1, rawBody );
+        return this.proxyRequest( c, endpoint, 1, normalizedBody );
+    }
+
+    private normalizeToolSearchForEndpoint( body: any, endpoint: string ): any {
+        if ( endpoint === 'responses' || !Array.isArray( body?.tools ) ) {
+            return body;
+        }
+
+        const normalizedTools = body.tools
+            .filter( ( tool: any ) => tool?.type !== 'tool_search' )
+            .map( ( tool: any ) => this.removeDeferLoadingField( tool ) );
+
+        const changed = normalizedTools.length !== body.tools.length
+            || normalizedTools.some( ( tool: any, index: number ) => tool !== body.tools[index] );
+
+        if ( !changed ) {
+            return body;
+        }
+
+        const normalizedBody: any = {
+            ...body,
+            tools: normalizedTools,
+        };
+
+        if ( this.toolChoicePointsToMissingTool( normalizedBody.tool_choice, normalizedTools ) ) {
+            delete normalizedBody.tool_choice;
+        }
+
+        return normalizedBody;
+    }
+
+    private removeDeferLoadingField( tool: any ): any {
+        if ( !tool || typeof tool !== 'object' ) {
+            return tool;
+        }
+
+        let changed = false;
+        const nextTool = { ...tool } as Record<string, any>;
+
+        if ( Object.prototype.hasOwnProperty.call( nextTool, 'defer_loading' ) ) {
+            delete nextTool.defer_loading;
+            changed = true;
+        }
+
+        if ( nextTool.function && typeof nextTool.function === 'object' && !Array.isArray( nextTool.function ) ) {
+            const fn = { ...nextTool.function } as Record<string, any>;
+            if ( Object.prototype.hasOwnProperty.call( fn, 'defer_loading' ) ) {
+                delete fn.defer_loading;
+                nextTool.function = fn;
+                changed = true;
+            }
+        }
+
+        return changed ? nextTool : tool;
+    }
+
+    private toolChoicePointsToMissingTool( toolChoice: any, tools: any[] ): boolean {
+        if ( !toolChoice || typeof toolChoice !== 'object' ) {
+            return false;
+        }
+
+        const selectedName = toolChoice?.function?.name;
+        if ( typeof selectedName !== 'string' || !selectedName ) {
+            return false;
+        }
+
+        const available = new Set<string>();
+        for ( const tool of tools ) {
+            if ( typeof tool?.function?.name === 'string' && tool.function.name ) {
+                available.add( tool.function.name );
+                continue;
+            }
+            if ( typeof tool?.name === 'string' && tool.name ) {
+                available.add( tool.name );
+            }
+        }
+
+        return !available.has( selectedName );
     }
 
     private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {
@@ -271,6 +349,7 @@ export class OpenAIProxy {
         searchResponse?: WebSearchResponse;
         errorResponse?: { status: number; body: any };
     }> {
+        const startedAt = Date.now();
         if ( !this.shouldUseOpenAIWebSearch( body ) ) {
             return { body };
         }
@@ -306,9 +385,16 @@ export class OpenAIProxy {
             };
         }
 
+        const searchDefaults = CONFIG.tools?.webSearch?.defaults;
         const searchResponse = await webSearchManager.search( query, {
-            maxResults: 8,
+            maxResults: searchDefaults?.maxResults ?? 6,
+            expand: searchDefaults?.expandQueries,
+            maxExpandedQueries: searchDefaults?.maxExpandedQueries,
+            parallelQueries: searchDefaults?.parallelQueries,
+            softTimeoutMs: searchDefaults?.softTimeoutMs,
+            providerTimeoutMs: searchDefaults?.providerTimeoutMs,
         } );
+        console.info( `[web-search] openai_prepare endpoint=${endpoint} durationMs=${Date.now() - startedAt} provider=${searchResponse.provider} cached=${searchResponse.cached} citations=${searchResponse.citations.length}` );
         return {
             body: this.injectOpenAIWebSearchContext( body, endpoint, searchResponse ),
             searchResponse,
@@ -888,6 +974,10 @@ export class OpenAIProxy {
     }
 
     private withReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): any {
+        if ( !this.isReasoningConfiguredForModel( config, selectedModel ) ) {
+            return this.stripReasoningFields( body );
+        }
+
         const effort = this.resolveReasoningEffort( body, config, selectedModel );
         if ( !effort || effort === 'none' ) {
             return body;
@@ -900,6 +990,10 @@ export class OpenAIProxy {
     }
 
     private resolveReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): ReasoningEffort | undefined {
+        if ( !this.isReasoningConfiguredForModel( config, selectedModel ) ) {
+            return undefined;
+        }
+
         if ( typeof body?.reasoning_effort === 'string' ) {
             return body.reasoning_effort as ReasoningEffort;
         }
@@ -917,7 +1011,33 @@ export class OpenAIProxy {
             return modelEntry.default_reasoning;
         }
 
-        return config.default_reasoning ?? 'medium';
+        return config.default_reasoning;
+    }
+
+    private isReasoningConfiguredForModel( config: OpenAIModelConfig, selectedModel: string ): boolean {
+        const hasProviderReasoning = Object.prototype.hasOwnProperty.call( config, 'reasoning_efforts' )
+            || Object.prototype.hasOwnProperty.call( config, 'default_reasoning' );
+        if ( hasProviderReasoning ) {
+            return true;
+        }
+
+        const modelEntry = config.models.find( model => {
+            const modelName = typeof model === 'string' ? model : model.model;
+            return stripFreeModifier( modelName ).normalizedId === stripFreeModifier( selectedModel ).normalizedId;
+        } );
+
+        return !!modelEntry
+            && typeof modelEntry === 'object'
+            && ( Object.prototype.hasOwnProperty.call( modelEntry, 'reasoning_efforts' )
+                || Object.prototype.hasOwnProperty.call( modelEntry, 'default_reasoning' ) );
+    }
+
+    private stripReasoningFields(body: any): any {
+        if ( !body || typeof body !== 'object' ) {
+            return body;
+        }
+        const { reasoning_effort, reasoning, thinking, include_reasoning, output_reasoning, ...rest } = body;
+        return rest;
     }
 
     private async parseResponsePayload( response: Response ): Promise<any> {
