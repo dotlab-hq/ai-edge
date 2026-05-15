@@ -56,6 +56,10 @@ The server starts on port **25789** by default. If busy, it auto-selects the nex
 
 With `--skip-prompts`, the server starts immediately without prompts.
 
+### Optional Runtime Tuning
+
+- `AI_EDGE_UPSTREAM_TIMEOUT_MS` - Upstream request timeout in milliseconds (default: `45000`).
+
 ## CLI Commands
 
 ### `init`

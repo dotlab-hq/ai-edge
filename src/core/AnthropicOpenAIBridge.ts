@@ -8,7 +8,7 @@ import {
     type AnthropicMessageResponse,
     type OpenAIChatResponse,
     type OpenAIStreamChunk,
-} from 'claude-adapter';
+} from '@/package/claude-adapter';
 
 type StreamWriter = {
     write: ( chunk: string ) => Promise<unknown>;
@@ -39,6 +39,8 @@ interface StreamState {
     openBlockTypes: Map<number, 'text' | 'tool_use' | 'server_tool_use'>;
     lastFinishReason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null;
     finished: boolean;
+    streamStartedAt: number;
+    firstSseEmissionLogged: boolean;
 }
 
 let toolIdCounter = 0;
@@ -62,7 +64,8 @@ export async function streamOpenAIResponseAsAnthropic(
     c: Context,
     response: Response,
     originalModel: string,
-    initialContentBlocks: Array<Record<string, any>> = []
+    initialContentBlocks: Array<Record<string, any>> = [],
+    requestStartedAt: number = Date.now()
 ): Promise<Response> {
     c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
     c.header( 'Cache-Control', 'no-cache, no-transform' );
@@ -78,14 +81,20 @@ export async function streamOpenAIResponseAsAnthropic(
         }
 
         const decoder = new TextDecoder();
-        const state = createStreamState( originalModel, initialContentBlocks );
+        const state = createStreamState( originalModel, initialContentBlocks, requestStartedAt );
         let buffer = '';
+        let firstUpstreamChunkLogged = false;
 
         try {
             while ( true ) {
                 const { done, value } = await reader.read();
                 if ( done ) {
                     break;
+                }
+
+                if ( value && !firstUpstreamChunkLogged ) {
+                    firstUpstreamChunkLogged = true;
+                    console.info( `[anthropic-bridge] first_upstream_chunk model=${originalModel} firstByteMs=${Date.now() - requestStartedAt}` );
                 }
 
                 buffer += decoder.decode( value, { stream: true } );
@@ -115,12 +124,13 @@ export async function streamOpenAIResponseAsAnthropic(
         } catch ( error: any ) {
             await sendErrorEvent( streamWriter, error instanceof Error ? error : new Error( String( error ) ), originalModel );
         } finally {
+            console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
             reader.releaseLock();
         }
     } );
 }
 
-function createStreamState( originalModel: string, initialContentBlocks: Array<Record<string, any>> = [] ): StreamState {
+function createStreamState( originalModel: string, initialContentBlocks: Array<Record<string, any>> = [], requestStartedAt: number = Date.now() ): StreamState {
     const serverToolUseCount = initialContentBlocks.filter( ( block ) => block?.type === 'server_tool_use' ).length;
 
     return {
@@ -141,6 +151,8 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         openBlockTypes: new Map(),
         lastFinishReason: null,
         finished: false,
+        streamStartedAt: requestStartedAt,
+        firstSseEmissionLogged: false,
     };
 }
 
@@ -468,12 +480,13 @@ async function sendErrorEvent( streamWriter: StreamWriter, error: Error, origina
 }
 
 async function sendSseEvent( state: StreamState | undefined, streamWriter: StreamWriter, data: Record<string, any> ): Promise<void> {
-    try {
-        const payload = `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n`;
-        await streamWriter.write( payload );
-    } catch ( err ) {
-        // swallowing write errors here will let upper layers handle stream lifecycle
+    if ( state && !state.firstSseEmissionLogged ) {
+        state.firstSseEmissionLogged = true;
+        console.info( `[anthropic-bridge] first_downstream_event model=${state.model} firstTokenMs=${Date.now() - state.streamStartedAt}` );
     }
+
+    const payload = `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n`;
+    await streamWriter.write( payload );
 }
 
 function mapStopReason( reason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null ): AnthropicMessageResponse['stop_reason'] {

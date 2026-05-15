@@ -9,6 +9,7 @@ import { webSearchManager, type WebSearchResponse } from './WebSearchManager';
 import { codeInterpreterManager } from './CodeInterpreterManager';
 import { stripFreeModifier } from '@/utils/modelIds';
 import { getUnifiedModelCatalog } from '@/utils/modelCatalog';
+import { formatTimingEntries } from '@/utils/timing';
 import {
     buildCodeInterpreterToolDefinition,
     normalizeToolChoice,
@@ -184,8 +185,16 @@ export class OpenAIProxy {
     }
 
     private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1, rawBody?: any ): Promise<any> {
+        const requestStartedAt = Date.now();
+        let bodyParsedAt = requestStartedAt;
+        let webSearchCompletedAt = requestStartedAt;
+        let rateLimitCompletedAt = requestStartedAt;
+        let upstreamRequestStartedAt = requestStartedAt;
+        let upstreamResponseReceivedAt = requestStartedAt;
         const resolvedBody = rawBody ?? await c.req.json().catch( () => ( {} ) );
+        bodyParsedAt = Date.now();
         const webSearchContext = await this.prepareWebSearchForOpenAI( resolvedBody, endpoint );
+        webSearchCompletedAt = Date.now();
         if ( webSearchContext.errorResponse ) {
             return c.json( webSearchContext.errorResponse.body, webSearchContext.errorResponse.status as any );
         }
@@ -243,6 +252,7 @@ export class OpenAIProxy {
                     rateLimit,
                     selectedModel
                 );
+                rateLimitCompletedAt = Date.now();
 
                 if ( !rateCheck.allowed ) {
                     console.error( `[${endpoint}] Rate limit exceeded for ${config.id} - need ${tokens} tokens, limit: ${rateLimit?.tokensPerMinute || rateLimit?.requestsPerMinute || 'unknown'}/min` );
@@ -251,11 +261,13 @@ export class OpenAIProxy {
 
                 try {
                     const url = this.buildApiUrl( config, endpoint );
+                    upstreamRequestStartedAt = Date.now();
                     const response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
                         body: JSON.stringify( upstreamBody ),
                     }, CONFIG.proxy );
+                    upstreamResponseReceivedAt = Date.now();
 
                     if ( response.status === 429 ) {
                         continue;
@@ -275,27 +287,56 @@ export class OpenAIProxy {
                     // Handle streaming responses
                     if ( upstreamBody.stream === true ) {
                         c.header( 'Content-Type', 'text/event-stream' );
-                        c.header( 'Cache-Control', 'no-cache' );
+                        c.header( 'Cache-Control', 'no-cache, no-transform' );
                         c.header( 'Connection', 'keep-alive' );
+                        c.header( 'X-Accel-Buffering', 'no' );
+                        const serverTiming = formatTimingEntries( {
+                            body_parse: bodyParsedAt - requestStartedAt,
+                            web_search: webSearchCompletedAt - requestStartedAt,
+                            rate_limit: rateLimitCompletedAt - requestStartedAt,
+                            upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+                            total: upstreamResponseReceivedAt - requestStartedAt,
+                        } );
+                        if ( serverTiming ) {
+                            c.header( 'Server-Timing', serverTiming );
+                        }
 
                         if ( response.body ) {
+                            console.info( `[${endpoint}] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
                             return stream( c, async ( streamWriter ) => {
                                 const reader = response.body!.getReader();
                                 const decoder = new TextDecoder();
+                                let firstChunkLogged = false;
 
                                 try {
                                     while ( true ) {
                                         const { done, value } = await reader.read();
                                         if ( done ) break;
+                                        if ( value && !firstChunkLogged ) {
+                                            firstChunkLogged = true;
+                                            console.info( `[${endpoint}] stream_first_chunk provider=${config.id} model=${selectedModel} firstByteMs=${Date.now() - upstreamResponseReceivedAt}` );
+                                        }
                                         const chunk = decoder.decode( value, { stream: true } );
                                         await streamWriter.write( chunk );
                                     }
+
+                                    const tail = decoder.decode();
+                                    if ( tail ) {
+                                        await streamWriter.write( tail );
+                                    }
+
+                                    console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
                                 } finally {
                                     reader.releaseLock();
                                 }
                             }, async ( err, streamWriter ) => {
                                 console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
-                                await streamWriter.writeln( 'An error occurred during streaming' );
+                                await streamWriter.writeln( `data: ${JSON.stringify( {
+                                    error: {
+                                        message: err?.message || 'An error occurred during streaming',
+                                        type: 'upstream_error',
+                                    }
+                                } )}\n` );
                             } );
                         }
                     }
@@ -312,6 +353,20 @@ export class OpenAIProxy {
                     }
 
                     const enrichedPayload = this.attachUsageIfMissing( endpoint, upstreamBody, payload );
+                    const transformMs = Date.now() - upstreamResponseReceivedAt;
+                    const totalMs = Date.now() - requestStartedAt;
+                    const serverTiming = formatTimingEntries( {
+                        body_parse: bodyParsedAt - requestStartedAt,
+                        web_search: webSearchCompletedAt - requestStartedAt,
+                        rate_limit: rateLimitCompletedAt - requestStartedAt,
+                        upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+                        transform: transformMs,
+                        total: totalMs,
+                    } );
+                    if ( serverTiming ) {
+                        c.header( 'Server-Timing', serverTiming );
+                    }
+                    console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
                     return c.json( this.attachWebSearchMetadata( endpoint, enrichedPayload, webSearchContext.searchResponse ), response.status as any );
                 } catch ( error: any ) {
                     lastFailure = {
@@ -332,10 +387,12 @@ export class OpenAIProxy {
         if ( lastFailure ) {
             const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
             console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+            console.info( `[${endpoint}] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt}` );
             return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
         }
 
         console.error( `\n❌ [${endpoint}] ALL PROVIDERS FAILED - No response from any backend\nModel: ${modelName}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+        console.info( `[${endpoint}] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt}` );
         return c.json( {
             error: {
                 message: 'All providers failed',
@@ -1032,7 +1089,7 @@ export class OpenAIProxy {
                 || Object.prototype.hasOwnProperty.call( modelEntry, 'default_reasoning' ) );
     }
 
-    private stripReasoningFields(body: any): any {
+    private stripReasoningFields( body: any ): any {
         if ( !body || typeof body !== 'object' ) {
             return body;
         }

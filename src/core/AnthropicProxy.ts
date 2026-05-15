@@ -6,6 +6,7 @@ import { CONFIG } from '@/utils/schema.lookup';
 import { fetchWithProxy } from '@/utils/proxyFetch';
 import { stripFreeModifier } from '@/utils/modelIds';
 import { getUnifiedModelCatalog } from '@/utils/modelCatalog';
+import { formatTimingEntries } from '@/utils/timing';
 import { convertAnthropicRequestToOpenAI, convertOpenAIResponseToAnthropic, streamOpenAIResponseAsAnthropic } from './AnthropicOpenAIBridge';
 import type { Config } from '@/schema';
 import { webSearchHandler } from './WebSearchHandler';
@@ -55,8 +56,11 @@ export class AnthropicProxy {
   }
 
   private async handleMessages( c: Context ) {
+    const requestStartedAt = Date.now();
     const rawBody = await c.req.json().catch( () => ( {} ) );
+    const bodyParsedAt = Date.now();
     const webSearchContext = await this.webSearchHandler.prepareAnthropicWebSearch( rawBody );
+    const webSearchCompletedAt = Date.now();
     if ( webSearchContext.errorResponse ) {
       return c.json( webSearchContext.errorResponse.body, webSearchContext.errorResponse.status as any );
     }
@@ -85,11 +89,13 @@ export class AnthropicProxy {
             const config = this.getBackendConfigForModel( requestedModel );
             const url = `${this.normalizeBaseUrl( config.baseUrl )}/chat/completions`;
             const upstreamRequest = this.withReasoningEffort( request, body, config, request?.model ?? requestedModel );
+            const upstreamRequestStartedAt = Date.now();
             const response = await fetchWithProxy( url, {
               method: 'POST',
               headers: this.buildHeaders( config ),
               body: JSON.stringify( upstreamRequest ),
             }, CONFIG.proxy );
+            const upstreamResponseReceivedAt = Date.now();
             const payload = await this.parseResponsePayload( response );
             if ( !response.ok ) {
               const error = new Error( `Upstream request failed with ${response.status}` );
@@ -97,12 +103,23 @@ export class AnthropicProxy {
               ( error as any ).payload = payload;
               throw error;
             }
+            console.info( `[messages] code_interpreter_upstream provider=${config.id} model=${requestedModel} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} totalMs=${upstreamResponseReceivedAt - requestStartedAt}` );
             return { response, payload };
           },
           this.calculateTokenCount.bind( this ),
           rateLimitManager,
           this.buildCodeInterpreterSessionId()
         );
+        const totalMs = Date.now() - requestStartedAt;
+        const serverTiming = formatTimingEntries( {
+          body_parse: bodyParsedAt - requestStartedAt,
+          web_search: webSearchCompletedAt - requestStartedAt,
+          total: totalMs,
+        } );
+        if ( serverTiming ) {
+          c.header( 'Server-Timing', serverTiming );
+        }
+        console.info( `[messages] success provider=code_interpreter model=${requestedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} totalMs=${totalMs}` );
         return c.json( toolRunResult.payload, 200 );
       } catch ( error: any ) {
         lastFailure = {
@@ -173,11 +190,13 @@ export class AnthropicProxy {
           );
           const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
           const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
+          const upstreamRequestStartedAt = Date.now();
           const response = await fetchWithProxy( url, {
             method: 'POST',
             headers: this.buildHeaders( config, openAIRequest.stream === true ),
             body: JSON.stringify( openAIRequest ),
           }, CONFIG.proxy );
+          const upstreamResponseReceivedAt = Date.now();
 
           if ( response.status === 429 ) {
             continue;
@@ -185,14 +204,26 @@ export class AnthropicProxy {
 
           const contentType = response.headers.get( 'content-type' ) ?? '';
           if ( openAIRequest.stream === true && response.ok && response.body && contentType.includes( 'text/event-stream' ) ) {
+            const serverTiming = formatTimingEntries( {
+              body_parse: bodyParsedAt - requestStartedAt,
+              web_search: webSearchCompletedAt - requestStartedAt,
+              upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+              total: upstreamResponseReceivedAt - requestStartedAt,
+            } );
+            if ( serverTiming ) {
+              c.header( 'Server-Timing', serverTiming );
+            }
+            console.info( `[messages] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
             return streamOpenAIResponseAsAnthropic(
               c,
               response,
               requestedModel,
-              webSearchContext.searchResponse ? this.buildAnthropicWebSearchBlocks( webSearchContext.searchResponse ) : undefined
+              webSearchContext.searchResponse ? this.buildAnthropicWebSearchBlocks( webSearchContext.searchResponse ) : undefined,
+              requestStartedAt
             );
           }
 
+          const transformStartedAt = Date.now();
           const payload = await this.parseResponsePayload( response );
 
           if ( !response.ok ) {
@@ -234,6 +265,19 @@ export class AnthropicProxy {
           const anthropicResponse = convertOpenAIResponseToAnthropic( normalizedResponse, requestedModel );
           const responseWithToolSearch = this.attachAnthropicToolSearchUsage( anthropicResponse, hadToolSearchRequest );
           const responseWithWebSearch = this.webSearchHandler.attachAnthropicWebSearchMetadata( responseWithToolSearch, webSearchContext.searchResponse );
+          const transformMs = Date.now() - transformStartedAt;
+          const totalMs = Date.now() - requestStartedAt;
+          const serverTiming = formatTimingEntries( {
+            body_parse: bodyParsedAt - requestStartedAt,
+            web_search: webSearchCompletedAt - requestStartedAt,
+            upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+            transform: transformMs,
+            total: totalMs,
+          } );
+          if ( serverTiming ) {
+            c.header( 'Server-Timing', serverTiming );
+          }
+          console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
           return c.json( this.attachUsageIfMissing( endpoint, body, responseWithWebSearch ), response.status as any );
         } catch ( error: any ) {
           lastFailure = {
@@ -255,10 +299,12 @@ export class AnthropicProxy {
     if ( lastFailure ) {
       const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
       console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+      console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
       return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
     }
 
     console.error( `\n❌ [${endpoint}] ALL OPENAI PROVIDERS FAILED - No response from any backend\nModel: ${requestedModel}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+    console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
     return c.json( {
       error: {
         message: 'All providers failed',
@@ -497,7 +543,7 @@ export class AnthropicProxy {
         || Object.prototype.hasOwnProperty.call( modelEntry, 'default_reasoning' ) );
   }
 
-  private stripReasoningFields(body: any): any {
+  private stripReasoningFields( body: any ): any {
     if ( !body || typeof body !== 'object' ) {
       return body;
     }
