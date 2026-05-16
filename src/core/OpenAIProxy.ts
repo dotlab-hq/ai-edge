@@ -906,8 +906,10 @@ export class OpenAIProxy {
             const matchesRequestedModel = this.configHasModel( config, modelName );
             const canRouteWithoutModelMatch = ( isAutoModel || config.randomRouting !== false ) && !matchesRequestedModel;
 
-            // For image endpoints, filter by capability and allow random routing
-            if ( endpoint === 'images/generations' ) {
+            // For capability-specific endpoints, only consider providers that explicitly support them.
+            if ( endpoint === 'embeddings' ) {
+                if ( !this.isEmbeddingsEnabled( config ) ) continue;
+            } else if ( endpoint === 'images/generations' ) {
                 if ( !this.isImageGenerationEnabled( config ) ) continue;
             } else if ( endpoint === 'images/edits' ) {
                 if ( !this.isImageEditingEnabled( config ) ) continue;
@@ -943,18 +945,16 @@ export class OpenAIProxy {
 
     private isImageGenerationEnabled( config: OpenAIModelConfig ): boolean {
         const imageModels = config.imageModels;
-        if ( typeof imageModels === 'boolean' ) {
-            return imageModels;
-        }
-        return imageModels?.image_generation === true;
+        return typeof imageModels === 'object' && imageModels?.image_generation === true;
+    }
+
+    private isEmbeddingsEnabled( config: OpenAIModelConfig ): boolean {
+        return config.embeddings === true;
     }
 
     private isImageEditingEnabled( config: OpenAIModelConfig ): boolean {
         const imageModels = config.imageModels;
-        if ( typeof imageModels === 'boolean' ) {
-            return imageModels;
-        }
-        return imageModels?.image_editing === true;
+        return typeof imageModels === 'object' && imageModels?.image_editing === true;
     }
 
     private isImageOnlyConfig( config: OpenAIModelConfig ): boolean {

@@ -9,13 +9,10 @@ const RateLimitSpec = z.object( {
 
 const RateLimitSchema = RateLimitSpec.optional()
 
-const ImageModelsSchema = z.union( [
-  z.boolean( { error: 'imageModels must be a boolean' } ),
-  z.object( {
-    image_generation: z.boolean( { error: 'image_generation must be a boolean' } ).optional(),
-    image_editing: z.boolean( { error: 'image_editing must be a boolean' } ).optional(),
-  } ).strict(),
-] ).optional().describe( 'If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.' )
+const ImageModelsSchema = z.object( {
+  image_generation: z.boolean( { error: 'image_generation must be a boolean' } ).optional(),
+  image_editing: z.boolean( { error: 'image_editing must be a boolean' } ).optional(),
+} ).strict().optional().describe( 'Provider image routing flags. Explicitly set image_generation and/or image_editing to enable those endpoints.' )
 
 const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider supports embeddings endpoint' )
 
@@ -59,6 +56,10 @@ const OpenAIModelSchema = z.object( {
     if ( hasObject && hasString ) {
       ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'models must be all strings or all objects with { model, rateLimit }' } )
     }
+    if ( val.imageModels && val.imageModels.image_generation !== true && val.imageModels.image_editing !== true ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['imageModels'], message: 'imageModels must enable at least one endpoint: image_generation or image_editing' } )
+    }
+
     if ( hasObject ) {
       if ( val.rateLimit ) {
         ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'backend-level rateLimit is forbidden when using per-model rate limits' } )

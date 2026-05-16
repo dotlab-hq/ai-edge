@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { OpenAIProxy } from '../src/core/OpenAIProxy';
 import { AnthropicProxy } from '../src/core/AnthropicProxy';
+import { CONFIG } from '../src/utils/schema.lookup';
 
 function baseProviderConfig(models: any[]): any {
   return {
@@ -74,4 +75,100 @@ test('AnthropicProxy strips reasoning fields when model has no explicit reasonin
   expect(normalized.reasoning_effort).toBeUndefined();
   expect(normalized.reasoning).toBeUndefined();
   expect(normalized.thinking).toBeUndefined();
+});
+
+test('OpenAIProxy only routes embeddings endpoint to embeddings-enabled providers', () => {
+  const proxy = new OpenAIProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['embed-model']),
+      id: 'embed-only',
+      embeddings: true,
+      imageModels: false,
+    },
+  ] as any;
+
+  try {
+    const backends = proxy.getBackendsForModel('unknown-model', 'embeddings');
+    expect(backends.map((backend: any) => backend.id)).toEqual(['embed-only']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('OpenAIProxy only routes image generation endpoint to image-enabled providers', () => {
+  const proxy = new OpenAIProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['img-gen-model']),
+      id: 'image-gen',
+      embeddings: false,
+      imageModels: { image_generation: true },
+    },
+    {
+      ...baseProviderConfig(['img-edit-model']),
+      id: 'image-edit',
+      embeddings: false,
+      imageModels: { image_editing: true },
+    },
+  ] as any;
+
+  try {
+    const backends = proxy.getBackendsForModel('unknown-model', 'images/generations');
+    expect(backends.map((backend: any) => backend.id)).toEqual(['image-gen']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('OpenAIProxy image endpoints require explicit imageModels fields', () => {
+  const proxy = new OpenAIProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['legacy-image-model']),
+      id: 'legacy-image-boolean',
+      embeddings: false,
+      imageModels: true,
+    },
+    {
+      ...baseProviderConfig(['img-gen-model']),
+      id: 'image-gen',
+      embeddings: false,
+      imageModels: { image_generation: true },
+    },
+    {
+      ...baseProviderConfig(['img-edit-model']),
+      id: 'image-edit',
+      embeddings: false,
+      imageModels: { image_editing: true },
+    },
+  ] as any;
+
+  try {
+    const generationBackends = proxy.getBackendsForModel('unknown-model', 'images/generations');
+    const editBackends = proxy.getBackendsForModel('unknown-model', 'images/edits');
+
+    expect(generationBackends.map((backend: any) => backend.id)).toEqual(['image-gen']);
+    expect(editBackends.map((backend: any) => backend.id)).toEqual(['image-edit']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
 });

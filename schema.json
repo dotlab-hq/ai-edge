@@ -376,24 +376,17 @@
                 }
               },
               "imageModels": {
-                "description": "If true, all models provided by this provider are for image operations only. Use { image_generation, image_editing } to control per-endpoint routing.",
-                "anyOf": [
-                  {
+                "description": "Provider image routing flags. Explicitly set image_generation and/or image_editing to enable those endpoints.",
+                "type": "object",
+                "properties": {
+                  "image_generation": {
                     "type": "boolean"
                   },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "image_generation": {
-                        "type": "boolean"
-                      },
-                      "image_editing": {
-                        "type": "boolean"
-                      }
-                    },
-                    "additionalProperties": false
+                  "image_editing": {
+                    "type": "boolean"
                   }
-                ]
+                },
+                "additionalProperties": false
               },
               "embeddings": {
                 "default": false,
