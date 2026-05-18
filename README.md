@@ -228,7 +228,7 @@ Auto-loaded on server startup with current rate limit usage.
 
 - `POST /v1/chat/completions` - Chat completions
 - `POST /v1/completions` - Text completions
-- `POST /v1/embeddings` - Embeddings
+- `POST /v1/embeddings` - Embeddings (`embeddings: true` providers are reserved for this endpoint and excluded from chat/completions/responses routing)
 - `GET /v1/models` - List available models
 
 Example:
@@ -302,6 +302,7 @@ All errors are returned in OpenAI-compatible format:
 
 - **400** - Invalid request (missing model, invalid parameters)
 - **429** - Rate limit exceeded (tries next backend)
+- **429 / 5xx** - Affected provider+model pair is put on a temporary 30s cooldown before being considered again
 - **502** - All backends failed
 - **503** - No backend configured
 

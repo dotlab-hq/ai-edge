@@ -36,6 +36,8 @@ interface StreamState {
     hasStarted: boolean;
     textContent: string;
     textBlockOpen: boolean;
+    reasoningEmittedStart: boolean;
+    reasoningEmittedEnd: boolean;
     openBlockTypes: Map<number, 'text' | 'tool_use' | 'server_tool_use'>;
     lastFinishReason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null;
     finished: boolean;
@@ -92,12 +94,15 @@ export async function streamOpenAIResponseAsAnthropic(
                     break;
                 }
 
-                if ( value && !firstUpstreamChunkLogged ) {
-                    firstUpstreamChunkLogged = true;
-                    console.info( `[anthropic-bridge] first_upstream_chunk model=${originalModel} firstByteMs=${Date.now() - requestStartedAt}` );
+                if ( value ) {
+                    const decoded = decoder.decode( value, { stream: true } );
+                    if ( !firstUpstreamChunkLogged ) {
+                        firstUpstreamChunkLogged = true;
+                        console.info( `[anthropic-bridge] first_upstream_chunk model=${originalModel} firstByteMs=${Date.now() - requestStartedAt}` );
+                    }
+                    
+                    buffer += decoded;
                 }
-
-                buffer += decoder.decode( value, { stream: true } );
                 const { events, remainder } = consumeSseBlocks( buffer );
                 buffer = remainder;
 
@@ -148,6 +153,8 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         hasStarted: false,
         textContent: '',
         textBlockOpen: false,
+        reasoningEmittedStart: false,
+        reasoningEmittedEnd: false,
         openBlockTypes: new Map(),
         lastFinishReason: null,
         finished: false,
@@ -221,7 +228,26 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
     }
 
     const delta = choice.delta;
+    let textToEmit = '';
+
+    const reasoning = delta.reasoning || delta.reasoning_content;
+    if ( reasoning ) {
+        if ( !state.reasoningEmittedStart ) {
+            textToEmit += '<think>\n';
+            state.reasoningEmittedStart = true;
+        }
+        textToEmit += reasoning;
+    }
+
     if ( delta.content ) {
+        if ( state.reasoningEmittedStart && !state.reasoningEmittedEnd ) {
+            textToEmit += '\n</think>\n\n';
+            state.reasoningEmittedEnd = true;
+        }
+        textToEmit += delta.content;
+    }
+
+    if ( textToEmit ) {
         const existingType = state.openBlockTypes.get( state.contentBlockIndex );
         if ( !state.textBlockOpen || ( existingType && existingType !== 'text' ) ) {
             if ( state.textBlockOpen && existingType && existingType !== 'text' ) {
@@ -234,8 +260,8 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
             state.textBlockOpen = true;
         }
 
-        state.textContent += delta.content;
-        await sendTextDelta( state, state.contentBlockIndex, delta.content, streamWriter );
+        state.textContent += textToEmit;
+        await sendTextDelta( state, state.contentBlockIndex, textToEmit, streamWriter );
     }
 
     if ( delta.tool_calls ) {
@@ -246,6 +272,11 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
 
     if ( choice.finish_reason ) {
         state.lastFinishReason = choice.finish_reason;
+
+        if ( state.reasoningEmittedStart && !state.reasoningEmittedEnd && state.textBlockOpen ) {
+            await sendTextDelta( state, state.contentBlockIndex, '\n</think>\n\n', streamWriter );
+            state.reasoningEmittedEnd = true;
+        }
 
         if ( state.textBlockOpen ) {
             await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );

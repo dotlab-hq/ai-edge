@@ -390,7 +390,7 @@
               },
               "embeddings": {
                 "default": false,
-                "description": "If true, this provider supports embeddings endpoint",
+                "description": "If true, this provider is reserved for embeddings routing and excluded from chat/completions/responses fallback",
                 "type": "boolean"
               },
               "individualLimit": {

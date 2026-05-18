@@ -104,6 +104,60 @@ test('OpenAIProxy only routes embeddings endpoint to embeddings-enabled provider
   }
 });
 
+test('OpenAIProxy excludes embeddings-only providers from chat fallback routing', () => {
+  const proxy = new OpenAIProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['embed-model']),
+      id: 'embed-only',
+      embeddings: true,
+      imageModels: false,
+    },
+  ] as any;
+
+  try {
+    const backends = proxy.getBackendsForModel('unknown-model', 'chat/completions');
+    expect(backends.map((backend: any) => backend.id)).toEqual(['text-only']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('AnthropicProxy excludes embeddings-only providers from message routing fallback', () => {
+  const proxy = new AnthropicProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['embed-model']),
+      id: 'embed-only',
+      embeddings: true,
+      imageModels: false,
+    },
+  ] as any;
+
+  try {
+    const backends = proxy.getBackendsForModel('unknown-model');
+    expect(backends.map((backend: any) => backend.id)).toEqual(['text-only']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
 test('OpenAIProxy only routes image generation endpoint to image-enabled providers', () => {
   const proxy = new OpenAIProxy() as any;
   const originalOpenAI = CONFIG.models.openai;

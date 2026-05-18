@@ -131,6 +131,8 @@ export interface OpenAIStreamChoice {
 export interface OpenAIStreamDelta {
     role?: 'assistant';
     content?: string;
+    reasoning?: string;
+    reasoning_content?: string;
     tool_calls?: OpenAIStreamToolCall[];
 }
 

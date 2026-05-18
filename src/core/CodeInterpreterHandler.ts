@@ -13,6 +13,7 @@ import {
   isCodeInterpreterToolName,
 } from './codeInterpreterFlow';
 import { stripFreeModifier } from '@/utils/modelIds';
+import { backendCooldownManager, isRetryableUpstreamStatus } from './BackendCooldownManager';
 const AUTO_MODEL_ID = 'auto';
 
 export type ProxyBackendConfig = {
@@ -32,6 +33,7 @@ export type ModelSelectionConfig = {
   rateLimit?: RateLimitConfig;
   models: Array<string | { model: string; params?: any }>;
   randomRouting?: boolean;
+  embeddings?: boolean;
 };
 
 export class CodeInterpreterHandler {
@@ -57,6 +59,12 @@ export class CodeInterpreterHandler {
       const candidateModels = this.getCandidateModelsForProvider( backendConfig, requestedModel );
 
       for ( const selectedModel of candidateModels ) {
+        const cooldownRemainingMs = backendCooldownManager.getRemainingMs( backendConfig.id, selectedModel );
+        if ( cooldownRemainingMs > 0 ) {
+          console.warn( `[Code Interpreter] cooldown_active provider=${backendConfig.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+          continue;
+        }
+
         try {
           const filteredBody = this.stripAnthropicCodeInterpreterTools( request );
           const openAIRequest = this.convertAnthropicToOpenAI( filteredBody, selectedModel );
@@ -116,6 +124,10 @@ export class CodeInterpreterHandler {
             continue;
           }
 
+          if ( isRetryableUpstreamStatus( error?.status ) ) {
+            backendCooldownManager.markFromStatus( backendConfig.id, selectedModel, error.status );
+          }
+
           lastFailure = {
             status: error?.status ?? 502,
             payload: error?.payload ?? {
@@ -131,7 +143,10 @@ export class CodeInterpreterHandler {
     }
 
     if ( lastFailure ) {
-      throw new Error( JSON.stringify( lastFailure.payload ) );
+      const error = new Error( 'Code interpreter upstream failure' );
+      ( error as any ).status = lastFailure.status;
+      ( error as any ).payload = lastFailure.payload;
+      throw error;
     }
 
     throw new Error( 'All providers failed for code interpreter' );
@@ -165,6 +180,10 @@ export class CodeInterpreterHandler {
 
   private getBackendsForModel( config: ProxyBackendConfig & ModelSelectionConfig, modelName: string ): any[] {
     const requestedNormalized = stripFreeModifier( modelName ).normalizedId;
+    if ( config.embeddings === true ) {
+      return [];
+    }
+
     return requestedNormalized === AUTO_MODEL_ID || config.models.some( m => {
       const candidate = typeof m === 'string' ? m : ( m as any ).model;
       return stripFreeModifier( candidate ).normalizedId === requestedNormalized;

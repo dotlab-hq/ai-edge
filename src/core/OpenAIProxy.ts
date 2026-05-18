@@ -18,6 +18,7 @@ import {
     type CodeInterpreterToolRun,
     isCodeInterpreterTool,
 } from './codeInterpreterFlow';
+import { backendCooldownManager } from './BackendCooldownManager';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -241,6 +242,12 @@ export class OpenAIProxy {
             const candidateModels = this.getCandidateModelsForProvider( config, modelName );
 
             for ( const selectedModel of candidateModels ) {
+                const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                if ( cooldownRemainingMs > 0 ) {
+                    console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+                    continue;
+                }
+
                 body.model = selectedModel;
                 const upstreamBody = this.withReasoningEffort( body, config, selectedModel );
 
@@ -269,6 +276,7 @@ export class OpenAIProxy {
                     }, CONFIG.proxy );
                     upstreamResponseReceivedAt = Date.now();
 
+                    backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
                     if ( response.status === 429 ) {
                         continue;
                     }
@@ -633,6 +641,12 @@ export class OpenAIProxy {
             const candidateModels = this.getCandidateModelsForProvider( config, modelName );
 
             for ( const selectedModel of candidateModels ) {
+                const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                if ( cooldownRemainingMs > 0 ) {
+                    console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+                    continue;
+                }
+
                 try {
                     const { payload } = await this.runCodeInterpreterFlow( config, body, endpoint, selectedModel );
                     const enrichedPayload = this.attachUsageIfMissing( endpoint, body, payload );
@@ -692,6 +706,8 @@ export class OpenAIProxy {
             const payload = await this.parseResponsePayload( response );
 
             if ( !response.ok ) {
+                const cooldownModel = typeof request?.model === 'string' ? request.model : selectedModel;
+                backendCooldownManager.markFromStatus( config.id, cooldownModel, response.status );
                 const error = new Error( `Upstream request failed with ${response.status}` );
                 ( error as any ).status = response.status;
                 ( error as any ).payload = payload;
@@ -914,7 +930,7 @@ export class OpenAIProxy {
             } else if ( endpoint === 'images/edits' ) {
                 if ( !this.isImageEditingEnabled( config ) ) continue;
             } else if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
-                if ( this.isImageOnlyConfig( config ) ) continue;
+                if ( this.isImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) ) continue;
             }
 
             if ( matchesRequestedModel ) {

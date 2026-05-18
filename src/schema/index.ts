@@ -14,7 +14,7 @@ const ImageModelsSchema = z.object( {
   image_editing: z.boolean( { error: 'image_editing must be a boolean' } ).optional(),
 } ).strict().optional().describe( 'Provider image routing flags. Explicitly set image_generation and/or image_editing to enable those endpoints.' )
 
-const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider supports embeddings endpoint' )
+const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for embeddings routing and excluded from chat/completions/responses fallback' )
 
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
 

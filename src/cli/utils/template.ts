@@ -75,6 +75,8 @@ export async function generateTemplate(): Promise<string> {
           "gpt-4",
           "gpt-4-turbo"
         ],
+        // Optional: reserve this provider for /v1/embeddings only
+        // "embeddings": true,
         // Track rate limits per backend instance
         "individualLimit": true,
         // Base URL for the OpenAI-compatible API

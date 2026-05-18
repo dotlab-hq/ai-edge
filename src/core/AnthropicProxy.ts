@@ -11,6 +11,7 @@ import { convertAnthropicRequestToOpenAI, convertOpenAIResponseToAnthropic, stre
 import type { Config } from '@/schema';
 import { webSearchHandler } from './WebSearchHandler';
 import { codeInterpreterHandler } from './CodeInterpreterHandler';
+import { backendCooldownManager } from './BackendCooldownManager';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -165,6 +166,12 @@ export class AnthropicProxy {
       const candidateModels = this.getCandidateModelsForProvider( config, requestedModel );
 
       for ( const selectedModel of candidateModels ) {
+        const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+        if ( cooldownRemainingMs > 0 ) {
+          console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+          continue;
+        }
+
         body.model = selectedModel;
 
         const tokens = this.calculateTokenCount( body );
@@ -198,6 +205,7 @@ export class AnthropicProxy {
           }, CONFIG.proxy );
           const upstreamResponseReceivedAt = Date.now();
 
+          backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
           if ( response.status === 429 ) {
             continue;
           }
@@ -364,6 +372,10 @@ export class AnthropicProxy {
     const fallbackBackends: OpenAIModelConfig[] = [];
 
     for ( const config of configs ) {
+      if ( this.isEmbeddingsEnabled( config ) ) {
+        continue;
+      }
+
       const matchesRequestedModel = this.configHasModel( config, modelName );
       if ( matchesRequestedModel ) {
         exactBackends.push( config );
@@ -389,6 +401,10 @@ export class AnthropicProxy {
       const candidate = typeof m === 'string' ? m : ( m as any ).model;
       return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
     } );
+  }
+
+  private isEmbeddingsEnabled( config: OpenAIModelConfig ): boolean {
+    return config.embeddings === true;
   }
 
   private getBackendConfigForModel( modelName: string ): OpenAIModelConfig {
