@@ -10,6 +10,33 @@ import { getUnifiedModelCatalog, refreshUnifiedModelCatalog } from "./src/utils/
 const app = new Hono()
 app.use( logger() )
 
+const requiredAccessKey = process.env.AI_EDGE_KEY?.trim();
+
+function extractAccessToken( authorization?: string, apiKeyHeader?: string ): string | undefined {
+    if ( apiKeyHeader ) {
+        return apiKeyHeader.trim();
+    }
+    if ( !authorization ) {
+        return undefined;
+    }
+    const trimmed = authorization.trim();
+    if ( trimmed.toLowerCase().startsWith( 'bearer ' ) ) {
+        return trimmed.slice( 7 ).trim();
+    }
+    return trimmed;
+}
+
+app.use( '*', async ( c, next ) => {
+    if ( !requiredAccessKey ) {
+        return next();
+    }
+    const token = extractAccessToken( c.req.header( 'authorization' ), c.req.header( 'x-api-key' ) );
+    if ( token !== requiredAccessKey ) {
+        return c.json( { error: 'Unauthorized' }, 401 );
+    }
+    return next();
+} )
+
 // Auto-load cache/stats on startup
 let cachedStats: Record<string, any> = {};
 

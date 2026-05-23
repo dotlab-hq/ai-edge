@@ -3,7 +3,7 @@
 import { access } from 'node:fs/promises';
 import { schema } from "@/schema";
 import { MODEL_FILE_PATHS } from "./lookup.files";
-import { readConfig } from "./readConfig";
+import { decodeConfigFromEnv, readConfig } from "./readConfig";
 
 async function fileExists( filePath: string ): Promise<boolean> {
     try {
@@ -14,23 +14,35 @@ async function fileExists( filePath: string ): Promise<boolean> {
     }
 }
 
-const files = await Promise.all( MODEL_FILE_PATHS.map( ( filePath ) => fileExists( filePath ) ) );
+let fileContent: unknown;
+const encodedConfig = process.env.AI_EDGE_CONFIG?.trim();
 
-const NoOfFilesFound = files.filter( Boolean ).length;
+if ( encodedConfig ) {
+    try {
+        fileContent = decodeConfigFromEnv( encodedConfig );
+    } catch ( error: any ) {
+        const message = error?.message || String( error );
+        throw new Error( `AI_EDGE_CONFIG is invalid or could not be decoded: ${message}` );
+    }
+} else {
+    const files = await Promise.all( MODEL_FILE_PATHS.map( ( filePath ) => fileExists( filePath ) ) );
 
-if ( NoOfFilesFound > 1 ) {
-    throw new Error( `Multiple model configuration files found. Please ensure only one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join( ", " )}` )
+    const NoOfFilesFound = files.filter( Boolean ).length;
+
+    if ( NoOfFilesFound > 1 ) {
+        throw new Error( `Multiple model configuration files found. Please ensure only one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join( ", " )}` )
+    }
+
+    if ( NoOfFilesFound === 0 ) {
+        throw new Error( `No model configuration file found. Please ensure one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join( ", " )}` )
+    }
+
+    const fileIndex = files.findIndex( Boolean );
+
+    const filePath = MODEL_FILE_PATHS[fileIndex] as string;
+
+    fileContent = await readConfig( filePath );
 }
-
-if ( NoOfFilesFound === 0 ) {
-    throw new Error( `No model configuration file found. Please ensure one of the following files exists in the workspace: ${MODEL_FILE_PATHS.join( ", " )}` )
-}
-
-const fileIndex = files.findIndex( Boolean );
-
-const filePath = MODEL_FILE_PATHS[fileIndex] as string;
-
-const fileContent = await readConfig( filePath );
 
 // const validate the file content against the schema
 const result = schema.safeParse( fileContent );

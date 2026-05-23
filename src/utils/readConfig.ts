@@ -2,18 +2,26 @@
 import { readFile } from 'node:fs/promises';
 import JSON5 from 'json5';
 
-export const readConfig = async ( filePath: string ) => {
-    const content = await readFile( filePath, 'utf-8' );
-
+export function parseConfigContent( content: string ) {
     const data = JSON5.parse( content );
     const substituted = substituteEnvVars( data );
     return substituted;
 }
 
+export function decodeConfigFromEnv( encoded: string ) {
+    const decoded = Buffer.from( encoded, 'base64' ).toString( 'utf-8' );
+    return parseConfigContent( decoded );
+}
+
+export const readConfig = async ( filePath: string ) => {
+    const content = await readFile( filePath, 'utf-8' );
+    return parseConfigContent( content );
+}
+
 function substituteEnvVars( obj: any ): any {
     if ( typeof obj === 'string' ) {
         return obj.replace( /\$\{([^}]+)\}/g, ( _, varName ) => {
-            return process.env[ varName ] ?? `\${${varName}}`;
+            return process.env[varName] ?? `\${${varName}}`;
         } );
     }
     if ( Array.isArray( obj ) ) {
@@ -21,8 +29,8 @@ function substituteEnvVars( obj: any ): any {
     }
     if ( obj !== null && typeof obj === 'object' ) {
         const result: any = {};
-        for ( const [ key, value ] of Object.entries( obj ) ) {
-            result[ key ] = substituteEnvVars( value );
+        for ( const [key, value] of Object.entries( obj ) ) {
+            result[key] = substituteEnvVars( value );
         }
         return result;
     }

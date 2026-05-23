@@ -4,7 +4,7 @@ import path from 'path';
 import net from 'node:net';
 import { access } from 'node:fs/promises';
 import { serve } from '@hono/node-server';
-import { readConfig } from '../../utils/readConfig';
+import { decodeConfigFromEnv, readConfig } from '../../utils/readConfig';
 import { getConfigFileName } from '../utils/template';
 
 const DEFAULT_PORT = 25789;
@@ -42,11 +42,14 @@ export async function startCommand(): Promise<void> {
     const cwd = process.cwd();
     const configFileName = getConfigFileName();
     const configPath = path.join( cwd, configFileName );
+    const encodedConfig = process.env.AI_EDGE_CONFIG?.trim();
 
-    const configExists = await access( configPath ).then( () => true ).catch( () => false );
-    if ( !configExists ) {
-      p.outro( chalk.red( `❌ ${configFileName} not found. Run "ai-edge init" first.` ) );
-      process.exit( 1 );
+    if ( !encodedConfig ) {
+      const configExists = await access( configPath ).then( () => true ).catch( () => false );
+      if ( !configExists ) {
+        p.outro( chalk.red( `❌ ${configFileName} not found. Run "ai-edge init" first.` ) );
+        process.exit( 1 );
+      }
     }
 
     const s = p.spinner();
@@ -54,7 +57,11 @@ export async function startCommand(): Promise<void> {
 
     let configData;
     try {
-      configData = await readConfig( configPath );
+      if ( encodedConfig ) {
+        configData = decodeConfigFromEnv( encodedConfig );
+      } else {
+        configData = await readConfig( configPath );
+      }
     } catch ( err: any ) {
       s.stop( '❌' );
       console.error( 'Config Error:', err?.message || err );
@@ -89,9 +96,14 @@ export async function startCommand(): Promise<void> {
       portNum = parseInt( port! );
     }
 
+    const accessKey = process.env.AI_EDGE_KEY?.trim();
+    const apiKeyMessage = accessKey
+      ? 'API Key: configured via AI_EDGE_KEY'
+      : 'API Key: ai-edge [anything will work :) ]';
+
     p.note(
       `Base URL: http://localhost:${portNum}\n` +
-      `API Key: ai-edge [anything will work :) ]\n` +
+      `${apiKeyMessage}\n` +
       `State Adapter: ${( configData as any )['state-adapter']}\n` +
       `Models Configured: ${( configData as any ).models.openai.length}`,
       '🌐 Server Configuration'
@@ -107,9 +119,10 @@ export async function startCommand(): Promise<void> {
 
       s2.stop( `✅ Server running on http://localhost:${portNum}` );
 
+      const exampleKey = accessKey || 'nlm-proxy';
       p.note(
         `curl -X GET http://localhost:${portNum}/ \\\n` +
-        `  -H "Authorization: Bearer nlm-proxy"`,
+        `  -H "Authorization: Bearer ${exampleKey}"`,
         '📚 Example Usage'
       );
 
