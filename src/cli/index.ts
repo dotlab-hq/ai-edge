@@ -5,6 +5,7 @@ import * as p from '@clack/prompts';
 import { initCommand } from './commands/init';
 import { startCommand } from './commands/start';
 import { resetCommand } from './commands/reset';
+import { base64Command } from './commands/base64';
 
 async function main() {
   const command = process.argv[2];
@@ -21,12 +22,16 @@ async function main() {
       case 'reset':
         await resetCommand();
         break;
+      case 'base64':
+        await base64Command();
+        break;
       default:
         p.intro( chalk.blue( '🚀 LLM Proxy CLI' ) );
         p.note(
           'init      - Initialize model.jsonc\n' +
           'start     - Start the server\n' +
-          'reset     - Reset configuration',
+          'reset     - Reset configuration\n' +
+          'base64    - Print base64-encoded config',
           'Commands'
         );
         p.note(
