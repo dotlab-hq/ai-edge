@@ -38,6 +38,7 @@ function modifySystemPromptForLocalAdapter( systemContent: string ): string {
 
 /**
  * Convert Anthropic Messages API request to OpenAI Chat Completions format.
+ * Supports Gemini native parts passthrough for multi-turn exact replay.
  */
 export function convertRequestToOpenAI(
     anthropicRequest: AnthropicMessageRequest,
@@ -141,7 +142,12 @@ function convertMessage(
         if ( message.role === 'user' ) {
             result.push( { role: 'user', content: message.content } );
         } else if ( !isAssistantPrefill( message.content ) ) {
-            result.push( { role: 'assistant', content: message.content } );
+            const assistantMsg: any = { role: 'assistant', content: message.content };
+            // Propagate Gemini metadata if present
+            if ( message._gemini?.parts ) {
+                assistantMsg._gemini = { parts: message._gemini.parts };
+            }
+            result.push( assistantMsg );
         }
         return result;
     }
@@ -211,13 +217,18 @@ function convertMessage(
         return result;
     }
 
-    const assistantMessage: OpenAIMessage = {
+    const assistantMessage: any = {
         role: 'assistant',
         content: textContent || null,
     };
 
     if ( toolCalls.length > 0 && assistantMessage.role === 'assistant' ) {
         assistantMessage.tool_calls = toolCalls;
+    }
+
+    // Propagate Gemini metadata if present
+    if ( message._gemini?.parts ) {
+        assistantMessage._gemini = { parts: message._gemini.parts };
     }
 
     result.push( assistantMessage );
@@ -345,14 +356,26 @@ function processAssistantContentBlocks(
         }
         dedupeContext.idMappings.get( block.id )!.push( idToUse );
 
-        toolCalls.push( {
+        const toolCall: OpenAIToolCall = {
             id: idToUse,
             type: 'function',
             function: {
                 name: block.name,
                 arguments: JSON.stringify( block.input ),
             },
-        } );
+        };
+
+        const FALLBACK_SIG = 'skip_thought_signature_validator';
+        const thoughtSignature = ( block as { _google?: { thought_signature?: string } } )?._google?.thought_signature
+            || ( block as { extra_content?: { google?: { thought_signature?: string } } } )?.extra_content?.google?.thought_signature
+            || FALLBACK_SIG;
+        (toolCall as any).extra_content = {
+            google: {
+                thought_signature: thoughtSignature,
+            },
+        };
+
+        toolCalls.push( toolCall );
     }
 
     return { textContent, toolCalls };

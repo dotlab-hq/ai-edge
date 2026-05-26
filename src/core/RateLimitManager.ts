@@ -12,7 +12,8 @@ interface BucketRecord {
 
 export class RateLimitManager {
     private readonly keyPrefix = 'rate_limit:';
-    private readonly locks = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+    private readonly locks = new Map<string, { promise: Promise<void>; resolve: () => void; expires: number }>();
+    private static readonly LOCK_TIMEOUT_MS = 5000; // 5 second timeout for locks
 
     async checkAndConsume(
         providerId: string,
@@ -87,19 +88,62 @@ export class RateLimitManager {
     }
 
     private async acquireLock( lockKey: string ): Promise<() => void> {
-        while ( this.locks.has( lockKey ) ) {
-            const existing = this.locks.get( lockKey )!;
-            await existing.promise;
+        // Clean up expired locks first
+        this.cleanupExpiredLocks();
+
+        while ( true ) {
+            const existing = this.locks.get( lockKey );
+            if ( !existing ) {
+                // No lock exists, try to create one
+                let resolveFn: () => void;
+                const promise = new Promise<void>( resolve => { resolveFn = resolve; } );
+                const expires = Date.now() + RateLimitManager.LOCK_TIMEOUT_MS;
+
+                // Use a map operation that is atomic for checking and setting
+                if ( !this.locks.has( lockKey ) ) {
+                    this.locks.set( lockKey, { promise, resolve: resolveFn!, expires } );
+
+                    return () => {
+                        resolveFn!();
+                        this.locks.delete( lockKey );
+                    };
+                }
+                // If we get here, another process created the lock while we were setting up
+                // Continue the loop to wait for it
+                continue;
+            }
+
+            // Lock exists, wait for it to be released or timeout
+            try {
+                await Promise.race( [
+                    existing.promise,
+                    this.timeoutPromise( Date.now() - existing.expires )
+                ] );
+                // After waiting, clean up expired locks again and retry
+                this.cleanupExpiredLocks();
+            } catch ( err ) {
+                // Timeout occurred, remove the expired lock and retry
+                this.locks.delete( lockKey );
+                this.cleanupExpiredLocks();
+            }
         }
+    }
 
-        let resolveFn: () => void;
-        const promise = new Promise<void>( resolve => { resolveFn = resolve; } );
-        this.locks.set( lockKey, { promise, resolve: resolveFn! } );
+    private timeoutPromise( ms: number ): Promise<never> {
+        return new Promise( ( _, reject ) => {
+            setTimeout( () => reject( new Error( 'Lock timeout' ) ), ms );
+        } );
+    }
 
-        return () => {
-            resolveFn!();
-            this.locks.delete( lockKey );
-        };
+    private cleanupExpiredLocks(): void {
+        const now = Date.now();
+        for ( const [key, lock] of this.locks.entries() ) {
+            if ( now > lock.expires ) {
+                this.locks.delete( key );
+                // Resolve the promise to prevent waiting forever
+                lock.resolve();
+            }
+        }
     }
 
     private async getOrCreateBucket( key: string, rateLimit?: RateLimit ): Promise<BucketRecord> {

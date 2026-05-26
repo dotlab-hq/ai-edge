@@ -37,6 +37,9 @@ export interface OpenAIAssistantMessage {
     reasoning_content?: string;
     reasoning_signature?: string;
     tool_calls?: OpenAIToolCall[];
+    _gemini?: {
+        parts?: unknown[];
+    };
 }
 
 export interface OpenAIToolMessage {
@@ -114,6 +117,7 @@ export interface OpenAIToolCall {
         name: string;
         arguments: string;
     };
+    thought_signature?: string;
 }
 
 export interface OpenAIChatResponse {

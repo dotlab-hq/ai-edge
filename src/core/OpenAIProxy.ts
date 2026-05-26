@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { randomBytes } from 'crypto';
 import { stream } from 'hono/streaming';
 import { rateLimitManager } from './RateLimitManager';
 import { CONFIG } from '@/utils/schema.lookup';
@@ -20,6 +21,7 @@ import {
 } from './codeInterpreterFlow';
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
+import { isDebugEnabled, redactForLog } from '@/utils/debug';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -30,6 +32,7 @@ export class OpenAIProxy {
     private app: Hono;
     private readonly rrIndexByKey = new Map<string, number>();
     private readonly providerStats = new ProviderStatsTracker();
+    private static readonly MAX_CACHE_SIZE = 1000;
 
     constructor() {
         this.app = new Hono();
@@ -252,7 +255,9 @@ export class OpenAIProxy {
                 }
 
                 body.model = selectedModel;
-                const upstreamBody = this.withReasoningEffort( body, config, selectedModel );
+                const upstreamBody = this.ensureToolCallThoughtSignatures(
+                    this.withReasoningEffort( body, config, selectedModel )
+                );
 
                 const tokens = this.calculateTokenCount( upstreamBody );
                 const rateLimit = this.getEffectiveRateLimit( config );
@@ -272,6 +277,10 @@ export class OpenAIProxy {
                 try {
                     const url = this.buildApiUrl( config, endpoint );
                     upstreamRequestStartedAt = Date.now();
+                    if ( isDebugEnabled() ) {
+                        console.info( `[${endpoint}] upstream_request model=${selectedModel} body=${JSON.stringify( redactForLog( upstreamBody ) )}` );
+                    }
+
                     const response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
@@ -355,6 +364,9 @@ export class OpenAIProxy {
                     }
 
                     const payload = await this.parseResponsePayload( response );
+                    if ( isDebugEnabled() ) {
+                        console.info( `[${endpoint}] upstream_response model=${selectedModel} status=${response.status} body=${JSON.stringify( redactForLog( payload ) )}` );
+                    }
 
                     if ( !response.ok ) {
                         lastFailure = {
@@ -696,7 +708,9 @@ export class OpenAIProxy {
 
     private async runCodeInterpreterFlow( config: OpenAIModelConfig, body: any, endpoint: string, selectedModel: string ): Promise<{ payload: any }> {
         const { request: chatRequest, responseMode } = this.normalizeCodeInterpreterRequest( body, endpoint, selectedModel );
-        const chatRequestWithReasoning = this.withReasoningEffort( chatRequest, config, selectedModel );
+        const chatRequestWithReasoning = this.ensureToolCallThoughtSignatures(
+            this.withReasoningEffort( chatRequest, config, selectedModel )
+        );
         const { tools } = stripCodeInterpreterTools( chatRequestWithReasoning.tools );
         const toolDefinition = buildCodeInterpreterToolDefinition();
         const toolChoice = normalizeToolChoice( body.tool_choice );
@@ -706,12 +720,19 @@ export class OpenAIProxy {
 
         const callModel = async ( request: any ) => {
             const url = this.buildApiUrl( config, upstreamEndpoint );
+            if ( isDebugEnabled() ) {
+                console.info( `[${upstreamEndpoint}] upstream_request model=${request?.model ?? selectedModel} body=${JSON.stringify( redactForLog( request ) )}` );
+            }
+
             const response = await fetchWithProxy( url, {
                 method: 'POST',
                 headers: this.buildHeaders( config ),
                 body: JSON.stringify( request ),
             }, CONFIG.proxy );
             const payload = await this.parseResponsePayload( response );
+            if ( isDebugEnabled() ) {
+                console.info( `[${upstreamEndpoint}] upstream_response model=${request?.model ?? selectedModel} status=${response.status} body=${JSON.stringify( redactForLog( payload ) )}` );
+            }
 
             if ( !response.ok ) {
                 const cooldownModel = typeof request?.model === 'string' ? request.model : selectedModel;
@@ -1037,6 +1058,14 @@ export class OpenAIProxy {
             return 0;
         }
 
+        // Clean up the rrIndexByKey map if it gets too large to prevent memory leak
+        if ( this.rrIndexByKey.size > OpenAIProxy.MAX_CACHE_SIZE ) {
+            // Remove a random entry
+            const keys = Array.from( this.rrIndexByKey.keys() );
+            const randomKey = keys[ Math.floor( Math.random() * keys.length ) ];
+            this.rrIndexByKey.delete( randomKey! );
+        }
+
         const current = this.rrIndexByKey.get( key ) ?? 0;
         const index = current % total;
         this.rrIndexByKey.set( key, ( index + 1 ) % total );
@@ -1233,6 +1262,84 @@ export class OpenAIProxy {
         return {
             ...responseData,
             usage,
+        };
+    }
+
+    private ensureToolCallThoughtSignatures( body: any ): any {
+        if ( !body || typeof body !== 'object' ) {
+            return body;
+        }
+
+        if ( !Array.isArray( body.messages ) ) {
+            return body;
+        }
+
+        const FALLBACK_SIG = 'skip_thought_signature_validator';
+
+        let changed = false;
+        const messages = body.messages.map( ( message: any ) => {
+            if ( !message || !Array.isArray( message.tool_calls ) ) {
+                return message;
+            }
+
+            const toolCalls = message.tool_calls.map( ( toolCall: any ) => {
+                if ( !toolCall || typeof toolCall !== 'object' ) {
+                    return toolCall;
+                }
+
+                // Gemini API expects thought_signature in extra_content.google.thought_signature
+                const existingSig = toolCall.extra_content?.google?.thought_signature
+                    || toolCall.thought_signature
+                    || toolCall.function?.thought_signature;
+
+                if ( existingSig ) {
+                    // Ensure it's in the right location
+                    if ( toolCall.extra_content?.google?.thought_signature ) {
+                        return toolCall;
+                    }
+                    changed = true;
+                    return {
+                        ...toolCall,
+                        extra_content: {
+                            ...( toolCall.extra_content || {} ),
+                            google: {
+                                ...( toolCall.extra_content?.google || {} ),
+                                thought_signature: existingSig,
+                            },
+                        },
+                    };
+                }
+
+                changed = true;
+                return {
+                    ...toolCall,
+                    extra_content: {
+                        ...( toolCall.extra_content || {} ),
+                        google: {
+                            ...( toolCall.extra_content?.google || {} ),
+                            thought_signature: FALLBACK_SIG,
+                        },
+                    },
+                };
+            } );
+
+            if ( toolCalls === message.tool_calls ) {
+                return message;
+            }
+
+            return {
+                ...message,
+                tool_calls: toolCalls,
+            };
+        } );
+
+        if ( !changed ) {
+            return body;
+        }
+
+        return {
+            ...body,
+            messages,
         };
     }
 

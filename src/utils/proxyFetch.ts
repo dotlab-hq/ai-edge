@@ -6,6 +6,12 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 120_000;
 const DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_CONNECTIONS_PER_ORIGIN = 16;
+const CACHE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_CACHE_SIZE = 100;
+
+// Start periodic cleanup of agent caches
+setInterval( cleanupAgentCaches, CACHE_CLEANUP_INTERVAL_MS );
+// Start periodic cleanup of agent caches
 
 function getEnvProxyUrl(): string | undefined {
     return process.env.HTTPS_PROXY
@@ -168,6 +174,39 @@ export function getUpstreamConnectionPoolStats(): Record<string, unknown> {
         directOrigins: Array.from( originAgentCache.keys() ),
         proxyUrls: Array.from( proxyAgentCache.keys() ),
     };
+}
+
+function cleanupAgentCaches(): void {
+    // Simple cleanup - in a production system, we might want to use LRU or similar
+    if ( originAgentCache.size > MAX_CACHE_SIZE ) {
+        // Clear half of the cache when it gets too large
+        const keysToRemove = Array.from( originAgentCache.keys() ).slice( 0, Math.floor( originAgentCache.size / 2 ) );
+        for ( const key of keysToRemove ) {
+            const agent = originAgentCache.get( key );
+            if ( agent ) {
+                // Agent doesn't have a close method, but we remove reference
+                originAgentCache.delete( key );
+            }
+        }
+    }
+
+    if ( proxyAgentCache.size > MAX_CACHE_SIZE ) {
+        // Clear half of the cache when it gets too large
+        const keysToRemove = Array.from( proxyAgentCache.keys() ).slice( 0, Math.floor( proxyAgentCache.size / 2 ) );
+        for ( const key of keysToRemove ) {
+            const agent = proxyAgentCache.get( key );
+            if ( agent ) {
+                // Close the proxy agent properly
+                try {
+                    // ProxyAgent doesn't have a close method in undici, but we remove reference
+                    proxyAgentCache.delete( key );
+                } catch ( e ) {
+                    // Ignore errors during cleanup
+                    proxyAgentCache.delete( key );
+                }
+            }
+        }
+    }
 }
 
 function getDispatcherForInput( input: FetchInput, proxyUrl?: string ): Dispatcher | undefined {

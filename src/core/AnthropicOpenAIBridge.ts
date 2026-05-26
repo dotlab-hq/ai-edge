@@ -1,4 +1,5 @@
 import type { Context } from 'hono';
+import { randomBytes } from 'crypto';
 import { stream } from 'hono/streaming';
 import {
     convertRequestToOpenAI,
@@ -257,9 +258,8 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
 
     if ( delta.content ) {
         if ( state.reasoningBlockOpen ) {
-            if ( state.reasoningSignature ) {
-                await sendSignatureDelta( state, state.contentBlockIndex, state.reasoningSignature, streamWriter );
-            }
+            const signature = getOrCreateThinkingSignature( state );
+            await sendSignatureDelta( state, state.contentBlockIndex, signature, streamWriter );
             await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
             state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
@@ -292,9 +292,8 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
         state.lastFinishReason = choice.finish_reason;
 
         if ( state.reasoningBlockOpen ) {
-            if ( state.reasoningSignature ) {
-                await sendSignatureDelta( state, state.contentBlockIndex, state.reasoningSignature, streamWriter );
-            }
+            const signature = getOrCreateThinkingSignature( state );
+            await sendSignatureDelta( state, state.contentBlockIndex, signature, streamWriter );
             await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
             state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
@@ -324,6 +323,15 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
     let currentCall = state.currentToolCalls.get( index );
 
     if ( !currentCall ) {
+        if ( state.reasoningBlockOpen ) {
+            const signature = getOrCreateThinkingSignature( state );
+            await sendSignatureDelta( state, state.contentBlockIndex, signature, streamWriter );
+            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            state.reasoningBlockOpen = false;
+            state.reasoningEmittedEnd = true;
+            state.contentBlockIndex++;
+        }
+
         if ( state.textBlockOpen ) {
             await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
             state.textBlockOpen = false;
@@ -489,10 +497,6 @@ async function sendThinkingDelta( state: StreamState | undefined, index: number,
 }
 
 async function sendSignatureDelta( state: StreamState | undefined, index: number, signature: string, streamWriter: StreamWriter ): Promise<void> {
-    if ( state && state.openBlockTypes.get( index ) !== 'thinking' ) {
-        return;
-    }
-
     await sendSseEvent( state, streamWriter, {
         type: 'content_block_delta',
         index,
@@ -501,6 +505,16 @@ async function sendSignatureDelta( state: StreamState | undefined, index: number
             signature,
         },
     } );
+}
+
+function getOrCreateThinkingSignature( state: StreamState ): string {
+    if ( state.reasoningSignature ) {
+        return state.reasoningSignature;
+    }
+
+    const signature = randomBytes( 32 ).toString( 'base64' );
+    state.reasoningSignature = signature;
+    return signature;
 }
 
 async function sendInputJsonDelta( state: StreamState | undefined, index: number, partialJson: string, streamWriter: StreamWriter ): Promise<void> {

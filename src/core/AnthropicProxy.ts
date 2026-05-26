@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { randomBytes } from 'crypto';
 import { stream } from 'hono/streaming';
 import { rateLimitManager } from './RateLimitManager';
 import { CONFIG } from '@/utils/schema.lookup';
@@ -13,6 +14,7 @@ import { webSearchHandler } from './WebSearchHandler';
 import { codeInterpreterHandler } from './CodeInterpreterHandler';
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
+import { isDebugEnabled, redactForLog } from '@/utils/debug';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -26,6 +28,7 @@ export class AnthropicProxy {
   private codeInterpreterHandler = codeInterpreterHandler;
   private readonly providerStats = new ProviderStatsTracker();
   private readonly backendRouteCache = new Map<string, OpenAIModelConfig[]>();
+  private static readonly MAX_CACHE_SIZE = 1000;
 
   constructor() {
     this.app = new Hono();
@@ -195,15 +198,21 @@ export class AnthropicProxy {
         }
 
         try {
-          const openAIRequest = this.withReasoningEffort(
-            convertAnthropicRequestToOpenAI( body, selectedModel, 'native' ),
-            body,
-            config,
-            selectedModel
+          const openAIRequest = this.ensureToolCallThoughtSignatures(
+            this.withReasoningEffort(
+              convertAnthropicRequestToOpenAI( body, selectedModel, 'native' ),
+              body,
+              config,
+              selectedModel
+            )
           );
           const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
           const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
           const upstreamRequestStartedAt = Date.now();
+          if ( isDebugEnabled() ) {
+            console.info( `[messages] upstream_request model=${selectedModel} body=${JSON.stringify( redactForLog( openAIRequest ) )}` );
+          }
+
           const response = await fetchWithProxy( url, {
             method: 'POST',
             headers: this.buildHeaders( config, openAIRequest.stream === true ),
@@ -241,6 +250,9 @@ export class AnthropicProxy {
 
           const transformStartedAt = Date.now();
           const payload = await this.parseResponsePayload( response );
+          if ( isDebugEnabled() ) {
+            console.info( `[messages] upstream_response model=${selectedModel} status=${response.status} body=${JSON.stringify( redactForLog( payload ) )}` );
+          }
 
           if ( !response.ok ) {
             lastFailure = {
@@ -743,6 +755,84 @@ export class AnthropicProxy {
         input_tokens: promptTokens,
         output_tokens: completionTokens,
       },
+    };
+  }
+
+  private ensureToolCallThoughtSignatures( body: any ): any {
+    if ( !body || typeof body !== 'object' ) {
+      return body;
+    }
+
+    if ( !Array.isArray( body.messages ) ) {
+      return body;
+    }
+
+    const FALLBACK_SIG = 'skip_thought_signature_validator';
+
+    let changed = false;
+    const messages = body.messages.map( ( message: any ) => {
+      if ( !message || !Array.isArray( message.tool_calls ) ) {
+        return message;
+      }
+
+        const toolCalls = message.tool_calls.map( ( toolCall: any ) => {
+          if ( !toolCall || typeof toolCall !== 'object' ) {
+            return toolCall;
+          }
+
+          // Gemini API expects thought_signature in extra_content.google.thought_signature
+          const existingSig = toolCall.extra_content?.google?.thought_signature
+            || toolCall.thought_signature
+            || toolCall.function?.thought_signature;
+
+          if ( existingSig ) {
+            // Ensure it's in the right location
+            if ( toolCall.extra_content?.google?.thought_signature ) {
+              return toolCall;
+            }
+            changed = true;
+            return {
+              ...toolCall,
+              extra_content: {
+                ...( toolCall.extra_content || {} ),
+                google: {
+                  ...( toolCall.extra_content?.google || {} ),
+                  thought_signature: existingSig,
+                },
+              },
+            };
+          }
+
+          changed = true;
+          return {
+            ...toolCall,
+            extra_content: {
+              ...( toolCall.extra_content || {} ),
+              google: {
+                ...( toolCall.extra_content?.google || {} ),
+                thought_signature: FALLBACK_SIG,
+              },
+            },
+          };
+        } );
+
+      if ( toolCalls === message.tool_calls ) {
+        return message;
+      }
+
+      return {
+        ...message,
+        tool_calls: toolCalls,
+      };
+    } );
+
+    if ( !changed ) {
+      return body;
+    }
+
+    return {
+      ...body,
+      messages,
     };
   }
 

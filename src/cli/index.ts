@@ -35,7 +35,8 @@ async function main() {
           'Commands'
         );
         p.note(
-          '--skip-prompts  - Skip interactive prompts',
+          `--skip-prompts  - Skip interactive prompts
+--debug         - Log upstream requests/responses`  ,
           'Options'
         );
         p.outro( 'Visit: https://github.com/dotlab-hq/ai-edge' );

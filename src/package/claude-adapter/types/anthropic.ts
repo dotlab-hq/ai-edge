@@ -18,6 +18,9 @@ export interface AnthropicMessageRequest {
 export interface AnthropicMessage {
     role: 'user' | 'assistant';
     content: string | AnthropicContentBlock[];
+    _gemini?: {
+        parts?: unknown[];
+    };
 }
 
 export interface AnthropicSystemContent {
@@ -46,6 +49,12 @@ export interface AnthropicThinkingBlock {
     type: 'thinking';
     thinking: string;
     signature?: string;
+    _provider_state?: {
+        google?: {
+            parts?: unknown[];
+            thought_signature?: string;
+        };
+    };
 }
 
 export interface AnthropicImageBlock {
@@ -74,6 +83,10 @@ export interface AnthropicToolUseBlock {
     id: string;
     name: string;
     input: Record<string, unknown>;
+    _google?: {
+        thought_signature?: string;
+        raw_parts?: unknown[];
+    };
 }
 
 export interface AnthropicToolResultBlock {
@@ -107,6 +120,9 @@ export interface AnthropicMessageResponse {
     stop_reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | null;
     stop_sequence: string | null;
     usage: AnthropicUsage;
+    _gemini?: {
+        parts?: unknown[];
+    };
 }
 
 export interface AnthropicUsage {

@@ -72,6 +72,7 @@ export async function startCommand(): Promise<void> {
     s.stop( '✅ Configuration loaded' );
 
     const skipPrompts = process.argv.includes( '--skip-prompts' );
+    const debugEnabled = process.argv.includes( '--debug' );
     let portNum: number;
 
     if ( skipPrompts ) {
@@ -96,16 +97,21 @@ export async function startCommand(): Promise<void> {
       portNum = parseInt( port! );
     }
 
+    if ( debugEnabled ) {
+      process.env.AI_EDGE_DEBUG = '1';
+    }
+
     const accessKey = process.env.AI_EDGE_KEY?.trim();
     const apiKeyMessage = accessKey
       ? 'API Key: configured via AI_EDGE_KEY'
       : 'API Key: ai-edge [anything will work :) ]';
 
     p.note(
-      `Base URL: http://localhost:${portNum}\n` +
-      `${apiKeyMessage}\n` +
-      `State Adapter: ${( configData as any )['state-adapter']}\n` +
-      `Models Configured: ${( configData as any ).models.openai.length}`,
+      `Base URL: http://localhost:${portNum}
+${apiKeyMessage}
+State Adapter: ${( configData as any )['state-adapter']}
+Models Configured: ${( configData as any ).models.openai.length}
+Debug: ${debugEnabled ? 'enabled' : 'disabled'}`,
       '🌐 Server Configuration'
     );
 

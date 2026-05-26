@@ -1,12 +1,33 @@
+import { randomBytes } from 'crypto';
 import type { AnthropicMessageResponse, AnthropicToolUseBlock } from '../types/anthropic';
 import type { OpenAIChatResponse, OpenAIToolCall } from '../types/openai';
 
 /**
+ * Extract Gemini's native parts array if available in the response metadata.
+ * This handles responses that came from Gemini backends and were transformed to OpenAI format.
+ */
+export function extractGeminiPartsFromResponse( openaiResponse: any ): unknown[] | undefined {
+    // Check if response contains Gemini parts metadata (set by upstream transformation)
+    if ( openaiResponse._gemini?.parts && Array.isArray( openaiResponse._gemini.parts ) ) {
+        return openaiResponse._gemini.parts;
+    }
+
+    // Check in choice message
+    if ( openaiResponse.choices?.[0]?.message?._gemini?.parts ) {
+        return openaiResponse.choices[0].message._gemini.parts;
+    }
+
+    return undefined;
+}
+
+/**
  * Convert OpenAI Chat Completion response to Anthropic Messages format.
+ * Embeds Gemini's native contents.parts in thinking blocks for lossless replay.
  */
 export function convertResponseToAnthropic(
     openaiResponse: OpenAIChatResponse,
-    originalModelRequested: string
+    originalModelRequested: string,
+    geminiParts?: unknown[]
 ): AnthropicMessageResponse {
     const choice = openaiResponse.choices[0];
     if ( !choice ) {
@@ -17,12 +38,27 @@ export function convertResponseToAnthropic(
     const content: AnthropicMessageResponse['content'] = [];
     const reasoning = message.reasoning || message.reasoning_content;
 
+    // Embed Gemini parts in thinking block if available
+    const partsToAttach = geminiParts || extractGeminiPartsFromResponse( openaiResponse );
+
     if ( reasoning ) {
-        content.push( {
+        const signature = message.reasoning_signature || randomBytes( 32 ).toString( 'base64' );
+        const thinkingBlock: any = {
             type: 'thinking',
             thinking: reasoning,
-            ...( message.reasoning_signature ? { signature: message.reasoning_signature } : {} ),
-        } );
+            signature,
+        };
+
+        // Attach Gemini provider state to thinking block for exact reconstruction
+        if ( partsToAttach && partsToAttach.length > 0 ) {
+            thinkingBlock._provider_state = {
+                google: {
+                    parts: partsToAttach,
+                },
+            };
+        }
+
+        content.push( thinkingBlock );
     }
 
     if ( message.content ) {
@@ -44,7 +80,7 @@ export function convertResponseToAnthropic(
         cache_read_input_tokens: openaiResponse.usage.prompt_tokens_details?.cached_tokens,
     };
 
-    return {
+    const response: AnthropicMessageResponse = {
         id: `msg_${openaiResponse.id}`,
         type: 'message',
         role: 'assistant',
@@ -54,6 +90,8 @@ export function convertResponseToAnthropic(
         stop_sequence: null,
         usage,
     };
+
+    return response;
 }
 
 /**
@@ -77,11 +115,21 @@ function convertToolCallToToolUse( toolCall: OpenAIToolCall ): AnthropicToolUseB
         input = { raw: toolCall.function.arguments };
     }
 
+    const FALLBACK_SIG = 'skip_thought_signature_validator';
+    const tc = toolCall as any;
+    const thoughtSignature = tc.thought_signature
+        || tc.extra_content?.google?.thought_signature
+        || tc.function?.thought_signature
+        || FALLBACK_SIG;
+
     return {
         type: 'tool_use',
         id: toolCall.id,
         name: toolCall.function.name,
         input,
+        _google: {
+            thought_signature: thoughtSignature,
+        },
     };
 }
 
