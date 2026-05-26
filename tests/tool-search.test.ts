@@ -125,3 +125,41 @@ test( 'Anthropic tool_choice targeting tool_search is removed after proxy normal
   expect( converted.tools[0]?.function?.name ).toBe( 'get_weather' );
   expect( converted.tool_choice ).toBeUndefined();
 } );
+
+test( 'Anthropic media blocks are preserved as OpenAI content parts', () => {
+  const converted = convertAnthropicRequestToOpenAI(
+    {
+      model: 'claude-sonnet-4-0',
+      max_tokens: 256,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: 'aGVsbG8=',
+              },
+            },
+            { type: 'text', text: 'What is in this image?' },
+          ],
+        },
+      ],
+    } as any,
+    'gpt-5.4'
+  ) as any;
+
+  expect( Array.isArray( converted.messages[0]?.content ) ).toBe( true );
+  expect( converted.messages[0].content[0] ).toEqual( {
+    type: 'image_url',
+    image_url: {
+      url: 'data:image/png;base64,aGVsbG8=',
+    },
+  } );
+  expect( converted.messages[0].content[1] ).toEqual( {
+    type: 'text',
+    text: 'What is in this image?',
+  } );
+} );

@@ -1,7 +1,11 @@
-import { fetch as undiciFetch, ProxyAgent } from 'undici';
+import { Agent, fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
 
 const proxyAgentCache = new Map<string, ProxyAgent>();
+const originAgentCache = new Map<string, Agent>();
 const DEFAULT_TIMEOUT_MS = 45_000;
+const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 120_000;
+const DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS = 600_000;
+const DEFAULT_CONNECTIONS_PER_ORIGIN = 16;
 
 function getEnvProxyUrl(): string | undefined {
     return process.env.HTTPS_PROXY
@@ -33,6 +37,30 @@ function getProxyAgent( proxyUrl: string ): ProxyAgent {
     return agent;
 }
 
+function getOriginFromInput( input: FetchInput ): string | undefined {
+    return getUrlFromInput( input )?.origin;
+}
+
+function getOriginAgent( origin: string ): Agent {
+    const cachedAgent = originAgentCache.get( origin );
+    if ( cachedAgent ) {
+        return cachedAgent;
+    }
+
+    const agent = new Agent( {
+        connections: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_CONNECTIONS_PER_ORIGIN', DEFAULT_CONNECTIONS_PER_ORIGIN ),
+        connectTimeout: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_CONNECT_TIMEOUT_MS', 10_000 ),
+        headersTimeout: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_HEADERS_TIMEOUT_MS', DEFAULT_TIMEOUT_MS ),
+        bodyTimeout: 0,
+        keepAliveTimeout: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_KEEP_ALIVE_TIMEOUT_MS', DEFAULT_KEEP_ALIVE_TIMEOUT_MS ),
+        keepAliveMaxTimeout: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_KEEP_ALIVE_MAX_TIMEOUT_MS', DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS ),
+        keepAliveTimeoutThreshold: 1_000,
+        pipelining: 1,
+    } );
+    originAgentCache.set( origin, agent );
+    return agent;
+}
+
 function getConfiguredTimeoutMs(): number {
     const raw = process.env.AI_EDGE_UPSTREAM_TIMEOUT_MS?.trim();
     if ( !raw ) {
@@ -42,6 +70,20 @@ function getConfiguredTimeoutMs(): number {
     const parsed = Number( raw );
     if ( !Number.isFinite( parsed ) || parsed <= 0 ) {
         return DEFAULT_TIMEOUT_MS;
+    }
+
+    return Math.trunc( parsed );
+}
+
+function getConfiguredPositiveInt( envName: string, fallback: number ): number {
+    const raw = process.env[envName]?.trim();
+    if ( !raw ) {
+        return fallback;
+    }
+
+    const parsed = Number( raw );
+    if ( !Number.isFinite( parsed ) || parsed <= 0 ) {
+        return fallback;
     }
 
     return Math.trunc( parsed );
@@ -74,10 +116,13 @@ export async function fetchWithProxy( input: FetchInput, init?: RequestInit, pro
 
     try {
         if ( !resolvedProxyUrl ) {
+            const origin = getOriginFromInput( input );
+            const dispatcher = origin ? getOriginAgent( origin ) : undefined;
             return await proxyAwareFetch( input, {
                 ...init,
                 signal: controller.signal,
-            } );
+                ...( dispatcher ? { dispatcher } : {} ),
+            } as RequestInit & { dispatcher?: Agent } );
         }
 
         const dispatcher = getProxyAgent( resolvedProxyUrl );
@@ -90,5 +135,64 @@ export async function fetchWithProxy( input: FetchInput, init?: RequestInit, pro
         if ( timeoutId ) {
             clearTimeout( timeoutId );
         }
+    }
+}
+
+export async function warmUpstreamConnection( input: FetchInput, proxyUrl?: string ): Promise<boolean> {
+    const dispatcher = getDispatcherForInput( input, proxyUrl );
+    const url = getUrlFromInput( input );
+    if ( !dispatcher || !url ) {
+        return false;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout( () => controller.abort(), getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_WARMUP_TIMEOUT_MS', 3_000 ) );
+
+    try {
+        const response = await proxyAwareFetch( url.href, {
+            method: 'HEAD',
+            signal: controller.signal,
+            dispatcher,
+        } as RequestInit & { dispatcher?: Dispatcher } );
+        await response.body?.cancel().catch( () => undefined );
+        return true;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout( timeoutId );
+    }
+}
+
+export function getUpstreamConnectionPoolStats(): Record<string, unknown> {
+    return {
+        directOrigins: Array.from( originAgentCache.keys() ),
+        proxyUrls: Array.from( proxyAgentCache.keys() ),
+    };
+}
+
+function getDispatcherForInput( input: FetchInput, proxyUrl?: string ): Dispatcher | undefined {
+    const resolvedProxyUrl = normalizeProxyUrl( proxyUrl );
+    if ( resolvedProxyUrl ) {
+        return getProxyAgent( resolvedProxyUrl );
+    }
+
+    const origin = getOriginFromInput( input );
+    return origin ? getOriginAgent( origin ) : undefined;
+}
+
+function getUrlFromInput( input: FetchInput ): URL | undefined {
+    try {
+        if ( typeof input === 'string' ) {
+            return new URL( input );
+        }
+        if ( 'href' in input && typeof input.href === 'string' ) {
+            return new URL( input.href );
+        }
+        if ( 'url' in input && typeof input.url === 'string' ) {
+            return new URL( input.url );
+        }
+        return undefined;
+    } catch {
+        return undefined;
     }
 }

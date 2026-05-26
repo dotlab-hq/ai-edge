@@ -38,7 +38,9 @@ interface StreamState {
     textBlockOpen: boolean;
     reasoningEmittedStart: boolean;
     reasoningEmittedEnd: boolean;
-    openBlockTypes: Map<number, 'text' | 'tool_use' | 'server_tool_use'>;
+    reasoningBlockOpen: boolean;
+    reasoningSignature?: string;
+    openBlockTypes: Map<number, 'text' | 'thinking' | 'tool_use' | 'server_tool_use'>;
     lastFinishReason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null;
     finished: boolean;
     streamStartedAt: number;
@@ -155,6 +157,8 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         textBlockOpen: false,
         reasoningEmittedStart: false,
         reasoningEmittedEnd: false,
+        reasoningBlockOpen: false,
+        reasoningSignature: undefined,
         openBlockTypes: new Map(),
         lastFinishReason: null,
         finished: false,
@@ -228,26 +232,40 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
     }
 
     const delta = choice.delta;
-    let textToEmit = '';
 
     const reasoning = delta.reasoning || delta.reasoning_content;
+    if ( typeof delta.reasoning_signature === 'string' ) {
+        state.reasoningSignature = delta.reasoning_signature;
+    } else if ( typeof delta.signature === 'string' ) {
+        state.reasoningSignature = delta.signature;
+    }
+
     if ( reasoning ) {
         if ( !state.reasoningEmittedStart ) {
-            textToEmit += '<think>\n';
+            if ( state.textBlockOpen ) {
+                await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+                state.textBlockOpen = false;
+                state.textContent = '';
+                state.contentBlockIndex++;
+            }
+            await sendThinkingBlockStart( state, state.contentBlockIndex, streamWriter );
+            state.reasoningBlockOpen = true;
             state.reasoningEmittedStart = true;
         }
-        textToEmit += reasoning;
+        await sendThinkingDelta( state, state.contentBlockIndex, reasoning, streamWriter );
     }
 
     if ( delta.content ) {
-        if ( state.reasoningEmittedStart && !state.reasoningEmittedEnd ) {
-            textToEmit += '\n</think>\n\n';
+        if ( state.reasoningBlockOpen ) {
+            if ( state.reasoningSignature ) {
+                await sendSignatureDelta( state, state.contentBlockIndex, state.reasoningSignature, streamWriter );
+            }
+            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
+            state.contentBlockIndex++;
         }
-        textToEmit += delta.content;
-    }
 
-    if ( textToEmit ) {
         const existingType = state.openBlockTypes.get( state.contentBlockIndex );
         if ( !state.textBlockOpen || ( existingType && existingType !== 'text' ) ) {
             if ( state.textBlockOpen && existingType && existingType !== 'text' ) {
@@ -260,8 +278,8 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
             state.textBlockOpen = true;
         }
 
-        state.textContent += textToEmit;
-        await sendTextDelta( state, state.contentBlockIndex, textToEmit, streamWriter );
+        state.textContent += delta.content;
+        await sendTextDelta( state, state.contentBlockIndex, delta.content, streamWriter );
     }
 
     if ( delta.tool_calls ) {
@@ -273,9 +291,14 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
     if ( choice.finish_reason ) {
         state.lastFinishReason = choice.finish_reason;
 
-        if ( state.reasoningEmittedStart && !state.reasoningEmittedEnd && state.textBlockOpen ) {
-            await sendTextDelta( state, state.contentBlockIndex, '\n</think>\n\n', streamWriter );
+        if ( state.reasoningBlockOpen ) {
+            if ( state.reasoningSignature ) {
+                await sendSignatureDelta( state, state.contentBlockIndex, state.reasoningSignature, streamWriter );
+            }
+            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
+            state.contentBlockIndex++;
         }
 
         if ( state.textBlockOpen ) {
@@ -386,6 +409,19 @@ async function sendContentBlockStart(
     }
 }
 
+async function sendThinkingBlockStart( state: StreamState, index: number, streamWriter: StreamWriter ): Promise<void> {
+    await sendSseEvent( state, streamWriter, {
+        type: 'content_block_start',
+        index,
+        content_block: {
+            type: 'thinking',
+            thinking: '',
+        },
+    } );
+
+    state.openBlockTypes.set( index, 'thinking' );
+}
+
 async function emitInitialContentBlocks( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
     if ( state.initialContentBlocksEmitted || !state.initialContentBlocks.length ) {
         return;
@@ -433,6 +469,36 @@ async function sendTextDelta( state: StreamState | undefined, index: number, tex
         delta: {
             type: 'text_delta',
             text,
+        },
+    } );
+}
+
+async function sendThinkingDelta( state: StreamState | undefined, index: number, thinking: string, streamWriter: StreamWriter ): Promise<void> {
+    if ( state && state.openBlockTypes.get( index ) !== 'thinking' ) {
+        return;
+    }
+
+    await sendSseEvent( state, streamWriter, {
+        type: 'content_block_delta',
+        index,
+        delta: {
+            type: 'thinking_delta',
+            thinking,
+        },
+    } );
+}
+
+async function sendSignatureDelta( state: StreamState | undefined, index: number, signature: string, streamWriter: StreamWriter ): Promise<void> {
+    if ( state && state.openBlockTypes.get( index ) !== 'thinking' ) {
+        return;
+    }
+
+    await sendSseEvent( state, streamWriter, {
+        type: 'content_block_delta',
+        index,
+        delta: {
+            type: 'signature_delta',
+            signature,
         },
     } );
 }
@@ -610,6 +676,16 @@ function normalizeAnthropicMessage( message: AnthropicMessageRequest['messages']
         }
 
         if ( block.type === 'text' ) {
+            normalizedContent.push( block );
+            continue;
+        }
+
+        if ( block.type === 'image' || block.type === 'audio' || block.type === 'file' ) {
+            normalizedContent.push( block );
+            continue;
+        }
+
+        if ( block.type === 'thinking' ) {
             normalizedContent.push( block );
             continue;
         }

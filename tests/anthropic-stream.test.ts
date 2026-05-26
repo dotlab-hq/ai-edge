@@ -13,6 +13,26 @@ function openAIChunk(content: string): string {
   })}\n\n`;
 }
 
+function openAIReasoningChunk(reasoning: string): string {
+  return `data: ${JSON.stringify({
+    id: 'chatcmpl_test',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'upstream-model',
+    choices: [{ index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }],
+  })}\n\n`;
+}
+
+function openAIReasoningSignatureChunk(signature: string): string {
+  return `data: ${JSON.stringify({
+    id: 'chatcmpl_test',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'upstream-model',
+    choices: [{ index: 0, delta: { reasoning_signature: signature }, finish_reason: null }],
+  })}\n\n`;
+}
+
 function finishChunk(): string {
   return `data: ${JSON.stringify({
     id: 'chatcmpl_test',
@@ -231,6 +251,48 @@ test('Anthropic stream keeps delta type aligned with declared block type', async
 
     expect(body).toContain('"type":"tool_use"');
     expect(body).toContain('"type":"input_json_delta"');
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test('Anthropic reasoning streams as thinking blocks instead of think-tag text', async () => {
+  const encoder = new TextEncoder();
+  const upstream = new Response(
+    new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(openAIReasoningChunk('first thought')));
+        controller.enqueue(encoder.encode(openAIReasoningChunk(' second thought')));
+        controller.enqueue(encoder.encode(openAIReasoningSignatureChunk('sig-test')));
+        controller.enqueue(encoder.encode(openAIChunk('final answer')));
+        controller.enqueue(encoder.encode(finishChunk()));
+        controller.close();
+      },
+    }),
+    { headers: { 'Content-Type': 'text/event-stream' } }
+  );
+
+  const app = new Hono();
+  app.get('/stream', (c) => streamOpenAIResponseAsAnthropic(c, upstream, 'claude-test'));
+
+  const server = createAdaptorServer({ fetch: app.fetch });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+
+  try {
+    const address = server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    const response = await fetch(`http://127.0.0.1:${port}/stream`);
+    const body = await response.text();
+
+    expect(body).not.toContain('<think>');
+    expect(body).not.toContain('</think>');
+    expect(body).toContain('"content_block":{"type":"thinking","thinking":""}');
+    expect(body).toContain('"type":"thinking_delta","thinking":"first thought"');
+    expect(body).toContain('"type":"signature_delta","signature":"sig-test"');
+    expect(body).toContain('"content_block":{"type":"text","text":""}');
+    expect(body).toContain('"type":"text_delta","text":"final answer"');
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

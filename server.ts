@@ -6,6 +6,7 @@ import { anthropicProxy } from "./src/core/AnthropicProxy";
 import { CONFIG } from "./src/utils/schema.lookup";
 import { rateLimitManager } from "./src/core/RateLimitManager";
 import { getUnifiedModelCatalog, refreshUnifiedModelCatalog } from "./src/utils/modelCatalog";
+import { getUpstreamConnectionPoolStats, warmUpstreamConnection } from "./src/utils/proxyFetch";
 
 const app = new Hono()
 app.use( logger() )
@@ -76,8 +77,31 @@ async function loadStats() {
     }
 }
 
+async function warmConfiguredUpstreamConnections() {
+    const configs = CONFIG.models.openai ?? [];
+    const uniqueBaseUrls = Array.from( new Set(
+        configs
+            .map( config => config.baseUrl )
+            .filter( ( value ): value is string => typeof value === 'string' && value.length > 0 )
+    ) );
+
+    if ( uniqueBaseUrls.length === 0 ) {
+        return;
+    }
+
+    const startedAt = Date.now();
+    const results = await Promise.allSettled(
+        uniqueBaseUrls.map( baseUrl => warmUpstreamConnection( baseUrl, CONFIG.proxy ) )
+    );
+    const warmed = results.filter( result => result.status === 'fulfilled' && result.value ).length;
+    console.info( `[startup] upstream_connection_warmup warmed=${warmed}/${uniqueBaseUrls.length} durationMs=${Date.now() - startedAt}` );
+}
+
 // Load stats on initialization
 await loadStats();
+warmConfiguredUpstreamConnections().catch( error => {
+    console.warn( `[startup] upstream_connection_warmup_failed error=${error?.message || String( error )}` );
+} );
 
 app.get( '/', async ( c ) => {
     const data = await CACHE.getJson();
@@ -98,6 +122,10 @@ app.get( '/', async ( c ) => {
 app.get( '/stats', async ( c ) => {
     await loadStats();
     return c.json( cachedStats )
+} )
+
+app.get( '/connection-pools', ( c ) => {
+    return c.json( getUpstreamConnectionPoolStats() )
 } )
 
 app.get( '/clear', async ( c ) => {

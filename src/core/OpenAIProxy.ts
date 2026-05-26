@@ -19,14 +19,17 @@ import {
     isCodeInterpreterTool,
 } from './codeInterpreterFlow';
 import { backendCooldownManager } from './BackendCooldownManager';
+import { ProviderStatsTracker } from './ProviderStatsTracker';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 const AUTO_MODEL_ID = 'auto';
+const FAST_MODEL_HINTS = ['flash-lite', 'lite', 'mini', 'small', 'fast'];
 
 export class OpenAIProxy {
     private app: Hono;
     private readonly rrIndexByKey = new Map<string, number>();
+    private readonly providerStats = new ProviderStatsTracker();
 
     constructor() {
         this.app = new Hono();
@@ -234,7 +237,7 @@ export class OpenAIProxy {
             }, 400 );
         }
 
-        const backends = this.getRoundRobinBackends( modelName, matchingBackends );
+        const backends = this.getOptimizedBackends( modelName, endpoint, matchingBackends );
         const backendIds = backends.map( b => b.id ).join( ', ' );
         console.error( `[${endpoint}] Attempting backends for model ${modelName}: ${backendIds}` );
 
@@ -278,6 +281,7 @@ export class OpenAIProxy {
 
                     backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
                     if ( response.status === 429 ) {
+                        this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         continue;
                     }
 
@@ -311,6 +315,7 @@ export class OpenAIProxy {
 
                         if ( response.body ) {
                             console.info( `[${endpoint}] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
+                            this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                             return stream( c, async ( streamWriter ) => {
                                 const reader = response.body!.getReader();
                                 const decoder = new TextDecoder();
@@ -356,6 +361,7 @@ export class OpenAIProxy {
                             status: response.status,
                             payload,
                         };
+                        this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
                         continue;
                     }
@@ -375,8 +381,10 @@ export class OpenAIProxy {
                         c.header( 'Server-Timing', serverTiming );
                     }
                     console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
+                    this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                     return c.json( this.attachWebSearchMetadata( endpoint, enrichedPayload, webSearchContext.searchResponse ), response.status as any );
                 } catch ( error: any ) {
+                    this.providerStats.recordFailure( config.id, selectedModel );
                     lastFailure = {
                         status: 502,
                         payload: {
@@ -994,6 +1002,27 @@ export class OpenAIProxy {
         ];
     }
 
+    private getOptimizedBackends( modelName: string, endpoint: string | undefined, backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
+        const rotated = this.getRoundRobinBackends( `${endpoint ?? 'default'}:${modelName}`, backends );
+        return rotated.sort( ( left, right ) =>
+            this.scoreProvider( right, modelName ) - this.scoreProvider( left, modelName )
+        );
+    }
+
+    private scoreProvider( config: OpenAIModelConfig, requestedModel: string ): number {
+        const candidateModels = this.getCandidateModelsForProvider( config, requestedModel );
+        const firstModel = candidateModels[0] ?? requestedModel;
+        const stats = this.providerStats.getStats( config.id, firstModel );
+        const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30_000 ) : 0.5;
+        const successScore = stats?.successRateEwma ?? 1;
+        const exactScore = this.configHasModel( config, requestedModel ) ? 1 : 0;
+        return exactScore * 100
+            + successScore * 10
+            + latencyScore
+            + this.scoreModelSpeedHint( firstModel )
+            - ( stats?.consecutiveFailures ?? 0 );
+    }
+
     private getNextRoundRobinConfig( key: string, backends: OpenAIModelConfig[] ): OpenAIModelConfig | undefined {
         if ( !backends.length ) {
             return undefined;
@@ -1039,11 +1068,33 @@ export class OpenAIProxy {
             return [requestedModel];
         }
 
-        const startIndex = Math.floor( Math.random() * uniqueModels.length );
-        return [
-            ...uniqueModels.slice( startIndex ),
-            ...uniqueModels.slice( 0, startIndex ),
-        ];
+        return uniqueModels.sort( ( left, right ) =>
+            this.scoreModelForProvider( config, right ) - this.scoreModelForProvider( config, left )
+        );
+    }
+
+    private scoreModelForProvider( config: OpenAIModelConfig, modelName: string ): number {
+        const stats = this.providerStats.getStats( config.id, modelName );
+        const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30_000 ) : 0.5;
+        const successScore = stats?.successRateEwma ?? 1;
+        return successScore * 10
+            + latencyScore
+            + this.scoreModelSpeedHint( modelName )
+            - ( stats?.consecutiveFailures ?? 0 );
+    }
+
+    private scoreModelSpeedHint( modelName: string ): number {
+        const normalized = stripFreeModifier( modelName ).normalizedId.toLowerCase();
+        let score = 0;
+        if ( normalized.includes( 'flash-lite' ) || normalized.includes( 'lite' ) ) {
+            score += 2;
+        } else if ( FAST_MODEL_HINTS.some( hint => normalized.includes( hint ) ) ) {
+            score += 1;
+        }
+        if ( normalized.includes( 'preview' ) ) {
+            score -= 0.25;
+        }
+        return score;
     }
 
     private withReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): any {

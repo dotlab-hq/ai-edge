@@ -33,6 +33,9 @@ export interface OpenAIUserMessage {
 export interface OpenAIAssistantMessage {
     role: 'assistant';
     content: string | null;
+    reasoning?: string;
+    reasoning_content?: string;
+    reasoning_signature?: string;
     tool_calls?: OpenAIToolCall[];
 }
 
@@ -42,7 +45,11 @@ export interface OpenAIToolMessage {
     tool_call_id: string;
 }
 
-export type OpenAIUserContentPart = OpenAITextContentPart | OpenAIImageContentPart;
+export type OpenAIUserContentPart =
+    | OpenAITextContentPart
+    | OpenAIImageContentPart
+    | OpenAIAudioContentPart
+    | OpenAIFileContentPart;
 
 export interface OpenAITextContentPart {
     type: 'text';
@@ -54,6 +61,27 @@ export interface OpenAIImageContentPart {
     image_url: {
         url: string;
         detail?: 'low' | 'high' | 'auto';
+    };
+}
+
+export interface OpenAIAudioContentPart {
+    type: 'input_audio';
+    input_audio: {
+        data?: string;
+        format?: string;
+        url?: string;
+        file_id?: string;
+    };
+}
+
+export interface OpenAIFileContentPart {
+    type: 'file';
+    file: {
+        file_id?: string;
+        filename?: string;
+        file_data?: string;
+        url?: string;
+        media_type?: string;
     };
 }
 
@@ -133,6 +161,8 @@ export interface OpenAIStreamDelta {
     content?: string;
     reasoning?: string;
     reasoning_content?: string;
+    reasoning_signature?: string;
+    signature?: string;
     tool_calls?: OpenAIStreamToolCall[];
 }
 

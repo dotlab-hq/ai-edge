@@ -17,6 +17,12 @@ const ImageModelsSchema = z.object( {
 const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for embeddings routing and excluded from chat/completions/responses fallback' )
 
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
+const ModalitySchema = z.enum( ['text', 'image', 'audio', 'file'] )
+const ModalitiesSchema = z.array( ModalitySchema )
+  .min( 1, 'modalities must contain at least one modality' )
+  .optional()
+  .default( ['text', 'image', 'audio', 'file'] )
+  .describe( 'Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.' )
 
 const ReasoningConfigFields = {
   reasoning_efforts: z.array( ReasoningEffortSchema ).min( 1, 'reasoning_efforts must contain at least one effort' ).optional().describe( 'Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.' ),
@@ -32,6 +38,7 @@ function validateReasoningConfig( val: { reasoning_efforts?: string[]; default_r
 const ModelWithRateLimitSchema = z.object( {
   model: z.string( { error: 'model is required' } ).min( 1, 'model cannot be empty' ),
   rateLimit: RateLimitSpec,
+  modalities: ModalitiesSchema,
   ...ReasoningConfigFields,
 } ).strict().superRefine( validateReasoningConfig )
 
@@ -39,6 +46,7 @@ const OpenAIModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
   name: z.string( { error: 'name is required' } ).min( 1, 'name cannot be empty' ),
   models: z.array( z.union( [z.string( { error: 'each model must be a string' } ), ModelWithRateLimitSchema] ) ).min( 1, 'models array must contain at least one model' ),
+  modalities: ModalitiesSchema,
   imageModels: ImageModelsSchema,
   embeddings: EmbeddingsSchema,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
@@ -81,6 +89,7 @@ const AnthropicModelSchema = z.object( {
   id: z.string( { error: 'id is required' } ).min( 1, 'id cannot be empty' ),
   name: z.string( { error: 'name is required' } ).min( 1, 'name cannot be empty' ),
   models: z.array( z.union( [z.string( { error: 'each model must be a string' } ), ModelWithRateLimitSchema] ) ).min( 1, 'models array must contain at least one model' ),
+  modalities: ModalitiesSchema,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),

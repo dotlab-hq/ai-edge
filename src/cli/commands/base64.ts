@@ -1,6 +1,7 @@
 import path from 'path';
 import { access, readFile } from 'node:fs/promises';
 import { getConfigFileName } from '../utils/template';
+import { parseConfigContent } from '../../utils/readConfig';
 
 export async function base64Command(): Promise<void> {
     try {
@@ -15,7 +16,9 @@ export async function base64Command(): Promise<void> {
         }
 
         const content = await readFile( configPath, 'utf-8' );
-        const encoded = Buffer.from( content, 'utf-8' ).toString( 'base64' );
+        const parsed = parseConfigContent( content );
+        const normalized = JSON.stringify( parsed, null, 2 );
+        const encoded = Buffer.from( normalized, 'utf-8' ).toString( 'base64' );
         process.stdout.write( encoded );
     } catch ( error: any ) {
         console.error( `❌ ${error?.message || 'Failed to encode config'}` );

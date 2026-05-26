@@ -15,6 +15,15 @@ export function convertResponseToAnthropic(
 
     const message = choice.message;
     const content: AnthropicMessageResponse['content'] = [];
+    const reasoning = message.reasoning || message.reasoning_content;
+
+    if ( reasoning ) {
+        content.push( {
+            type: 'thinking',
+            thinking: reasoning,
+            ...( message.reasoning_signature ? { signature: message.reasoning_signature } : {} ),
+        } );
+    }
 
     if ( message.content ) {
         content.push( {

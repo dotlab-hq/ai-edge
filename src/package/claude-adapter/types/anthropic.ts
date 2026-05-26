@@ -28,12 +28,46 @@ export interface AnthropicSystemContent {
     };
 }
 
-export type AnthropicContentBlock = AnthropicTextBlock | AnthropicToolUseBlock | AnthropicToolResultBlock;
+export type AnthropicContentBlock =
+    | AnthropicTextBlock
+    | AnthropicThinkingBlock
+    | AnthropicImageBlock
+    | AnthropicFileBlock
+    | AnthropicAudioBlock
+    | AnthropicToolUseBlock
+    | AnthropicToolResultBlock;
 
 export interface AnthropicTextBlock {
     type: 'text';
     text: string;
 }
+
+export interface AnthropicThinkingBlock {
+    type: 'thinking';
+    thinking: string;
+    signature?: string;
+}
+
+export interface AnthropicImageBlock {
+    type: 'image';
+    source?: AnthropicMediaSource;
+}
+
+export interface AnthropicFileBlock {
+    type: 'file';
+    source?: AnthropicMediaSource;
+}
+
+export interface AnthropicAudioBlock {
+    type: 'audio';
+    source?: AnthropicMediaSource;
+}
+
+export type AnthropicMediaSource =
+    | { type: 'base64'; media_type?: string; data: string }
+    | { type: 'url'; url: string }
+    | { type: 'file'; file_id: string }
+    | Record<string, unknown>;
 
 export interface AnthropicToolUseBlock {
     type: 'tool_use';

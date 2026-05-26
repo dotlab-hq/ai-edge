@@ -12,15 +12,20 @@ import type { Config } from '@/schema';
 import { webSearchHandler } from './WebSearchHandler';
 import { codeInterpreterHandler } from './CodeInterpreterHandler';
 import { backendCooldownManager } from './BackendCooldownManager';
+import { ProviderStatsTracker } from './ProviderStatsTracker';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
+type Modality = NonNullable<OpenAIModelConfig['modalities']>[number];
 const AUTO_MODEL_ID = 'auto';
+const DEFAULT_MODALITIES: readonly Modality[] = ['text', 'image', 'audio', 'file'];
 
 export class AnthropicProxy {
   private app: Hono;
   private webSearchHandler = webSearchHandler;
   private codeInterpreterHandler = codeInterpreterHandler;
+  private readonly providerStats = new ProviderStatsTracker();
+  private readonly backendRouteCache = new Map<string, OpenAIModelConfig[]>();
 
   constructor() {
     this.app = new Hono();
@@ -68,6 +73,7 @@ export class AnthropicProxy {
 
     const body = webSearchContext.body;
     const requestedModel = body.model;
+    const requiredModalities = this.getRequiredModalities( body );
     const hadToolSearchRequest = this.hasAnthropicToolSearchRequest( body );
     let lastFailure: { status: number; payload: any } | null = null;
 
@@ -147,7 +153,7 @@ export class AnthropicProxy {
     }
 
     const endpoint = 'messages';
-    const matchingBackends = this.getBackendsForModel( requestedModel );
+    const matchingBackends = this.getBackendsForModel( requestedModel, requiredModalities );
     if ( !matchingBackends.length ) {
       console.error( `[${endpoint}] No OpenAI backends found for model: ${requestedModel}` );
       return c.json( {
@@ -158,12 +164,12 @@ export class AnthropicProxy {
       }, 400 );
     }
 
-    const backends = this.getRoundRobinBackends( requestedModel, matchingBackends );
+    const backends = this.getOptimizedBackends( requestedModel, matchingBackends, requiredModalities );
     const backendIds = backends.map( b => b.id ).join( ', ' );
     console.error( `[${endpoint}] Attempting OpenAI backends for model ${requestedModel}: ${backendIds}` );
 
     for ( const config of backends ) {
-      const candidateModels = this.getCandidateModelsForProvider( config, requestedModel );
+      const candidateModels = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
 
       for ( const selectedModel of candidateModels ) {
         const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
@@ -207,6 +213,7 @@ export class AnthropicProxy {
 
           backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
           if ( response.status === 429 ) {
+            this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
             continue;
           }
 
@@ -222,6 +229,7 @@ export class AnthropicProxy {
               c.header( 'Server-Timing', serverTiming );
             }
             console.info( `[messages] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
+            this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
             return streamOpenAIResponseAsAnthropic(
               c,
               response,
@@ -239,6 +247,7 @@ export class AnthropicProxy {
               status: response.status,
               payload,
             };
+            this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
             console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
             continue;
           }
@@ -286,8 +295,10 @@ export class AnthropicProxy {
             c.header( 'Server-Timing', serverTiming );
           }
           console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
+          this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
           return c.json( this.attachUsageIfMissing( endpoint, body, responseWithWebSearch ), response.status as any );
         } catch ( error: any ) {
+          this.providerStats.recordFailure( config.id, selectedModel );
           lastFailure = {
             status: 502,
             payload: {
@@ -361,7 +372,13 @@ export class AnthropicProxy {
     };
   }
 
-  private getBackendsForModel( modelName: string ): OpenAIModelConfig[] {
+  private getBackendsForModel( modelName: string, requiredModalities: readonly Modality[] = ['text'] ): OpenAIModelConfig[] {
+    const cacheKey = this.buildRouteCacheKey( modelName, requiredModalities );
+    const cached = this.backendRouteCache.get( cacheKey );
+    if ( cached ) {
+      return cached;
+    }
+
     const configs = CONFIG.models.openai || [];
     const isAutoModel = this.isAutoModel( modelName );
     const modelIsListed = configs.some( config =>
@@ -372,7 +389,7 @@ export class AnthropicProxy {
     const fallbackBackends: OpenAIModelConfig[] = [];
 
     for ( const config of configs ) {
-      if ( this.isEmbeddingsEnabled( config ) ) {
+      if ( this.isEmbeddingsEnabled( config ) || !this.providerSupportsModalities( config, requiredModalities ) ) {
         continue;
       }
 
@@ -384,11 +401,11 @@ export class AnthropicProxy {
       }
     }
 
-    if ( isAutoModel ) {
-      return fallbackBackends;
-    }
-
-    return modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+    const result = isAutoModel
+      ? fallbackBackends
+      : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+    this.backendRouteCache.set( cacheKey, result );
+    return result;
   }
 
   private isAutoModel( modelName: string ): boolean {
@@ -438,15 +455,6 @@ export class AnthropicProxy {
     return [...backends.slice( startIndex ), ...backends.slice( 0, startIndex )];
   }
 
-  private getNextRoundRobinConfig( key: string, backends: OpenAIModelConfig[] ): OpenAIModelConfig | undefined {
-    if ( !backends.length ) {
-      return undefined;
-    }
-
-    const index = this.getAndIncrementRoundRobinIndex( key, backends.length );
-    return backends[index];
-  }
-
   private getAndIncrementRoundRobinIndex( key: string, total: number ): number {
     if ( total <= 0 ) {
       return 0;
@@ -475,13 +483,30 @@ export class AnthropicProxy {
     return headers;
   }
 
-  private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {
+  private getOptimizedBackends( modelName: string, backends: OpenAIModelConfig[], requiredModalities: readonly Modality[] ): OpenAIModelConfig[] {
+    const candidates = this.getRoundRobinBackends( this.buildRouteCacheKey( modelName, requiredModalities ), backends );
+    return candidates.sort( ( left, right ) => this.scoreProvider( right, modelName, requiredModalities ) - this.scoreProvider( left, modelName, requiredModalities ) );
+  }
+
+  private scoreProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] ): number {
+    const candidateModels = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
+    const modelName = candidateModels[0] ?? requestedModel;
+    const stats = this.providerStats.getStats( config.id, modelName );
+    const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30000 ) : 0.5;
+    const successScore = stats?.successRateEwma ?? 1;
+    const exactScore = this.configHasModel( config, requestedModel ) ? 1 : 0;
+    return exactScore * 100 + successScore * 10 + latencyScore - ( stats?.consecutiveFailures ?? 0 );
+  }
+
+  private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] = ['text'] ): string[] {
     const isAutoModel = this.isAutoModel( requestedModel );
-    if ( config.randomRouting === false && !isAutoModel ) {
+    if ( config.randomRouting === false && !isAutoModel && this.modelSupportsModalities( config, requestedModel, requiredModalities ) ) {
       return [requestedModel];
     }
 
-    const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+    const modelNames = config.models
+      .filter( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) )
+      .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
     const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
     const normalizedModels = modelNames.map( modelName => stripFreeModifier( modelName ).normalizedId );
     if ( !isAutoModel && normalizedModels.includes( requestedNormalized ) ) {
@@ -494,6 +519,54 @@ export class AnthropicProxy {
 
     const startIndex = Math.floor( Math.random() * uniqueModels.length );
     return [...uniqueModels.slice( startIndex ), ...uniqueModels.slice( 0, startIndex )];
+  }
+
+  private getRequiredModalities( body: any ): Modality[] {
+    const modalities = new Set<Modality>( ['text'] );
+
+    for ( const message of Array.isArray( body?.messages ) ? body.messages : [] ) {
+      const content = message?.content;
+      if ( !Array.isArray( content ) ) {
+        continue;
+      }
+
+      for ( const block of content ) {
+        if ( block?.type === 'image' || block?.type === 'image_url' ) {
+          modalities.add( 'image' );
+        } else if ( block?.type === 'audio' || block?.type === 'input_audio' ) {
+          modalities.add( 'audio' );
+        } else if ( block?.type === 'file' || block?.type === 'input_file' ) {
+          modalities.add( 'file' );
+        }
+      }
+    }
+
+    return Array.from( modalities );
+  }
+
+  private providerSupportsModalities( config: OpenAIModelConfig, requiredModalities: readonly Modality[] ): boolean {
+    const providerModalities = new Set( config.modalities ?? DEFAULT_MODALITIES );
+    return requiredModalities.every( modality => providerModalities.has( modality ) )
+      || config.models.some( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) );
+  }
+
+  private modelSupportsModalities( config: OpenAIModelConfig, modelName: string, requiredModalities: readonly Modality[] ): boolean {
+    const modelEntry = config.models.find( model => {
+      const candidate = typeof model === 'string' ? model : model.model;
+      return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( modelName ).normalizedId;
+    } );
+    return modelEntry ? this.modelEntrySupportsModalities( config, modelEntry, requiredModalities ) : this.providerSupportsModalities( config, requiredModalities );
+  }
+
+  private modelEntrySupportsModalities( config: OpenAIModelConfig, model: OpenAIModelConfig['models'][number], requiredModalities: readonly Modality[] ): boolean {
+    const modalities = new Set( typeof model === 'object'
+      ? ( model.modalities ?? config.modalities ?? DEFAULT_MODALITIES )
+      : ( config.modalities ?? DEFAULT_MODALITIES ) );
+    return requiredModalities.every( modality => modalities.has( modality ) );
+  }
+
+  private buildRouteCacheKey( modelName: string, requiredModalities: readonly Modality[] ): string {
+    return `${stripFreeModifier( modelName ).normalizedId}|${[...requiredModalities].sort().join( ',' )}`;
   }
 
   private withReasoningEffort( openAIRequest: any, sourceBody: any, config: OpenAIModelConfig, selectedModel: string ): any {

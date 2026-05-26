@@ -337,6 +337,26 @@
                           },
                           "additionalProperties": false
                         },
+                        "modalities": {
+                          "default": [
+                            "text",
+                            "image",
+                            "audio",
+                            "file"
+                          ],
+                          "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
+                          "minItems": 1,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio",
+                              "file"
+                            ]
+                          }
+                        },
                         "reasoning_efforts": {
                           "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                           "minItems": 1,
@@ -372,6 +392,26 @@
                       ],
                       "additionalProperties": false
                     }
+                  ]
+                }
+              },
+              "modalities": {
+                "default": [
+                  "text",
+                  "image",
+                  "audio",
+                  "file"
+                ],
+                "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "image",
+                    "audio",
+                    "file"
                   ]
                 }
               },
@@ -524,6 +564,26 @@
                           },
                           "additionalProperties": false
                         },
+                        "modalities": {
+                          "default": [
+                            "text",
+                            "image",
+                            "audio",
+                            "file"
+                          ],
+                          "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
+                          "minItems": 1,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio",
+                              "file"
+                            ]
+                          }
+                        },
                         "reasoning_efforts": {
                           "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                           "minItems": 1,
@@ -559,6 +619,26 @@
                       ],
                       "additionalProperties": false
                     }
+                  ]
+                }
+              },
+              "modalities": {
+                "default": [
+                  "text",
+                  "image",
+                  "audio",
+                  "file"
+                ],
+                "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "image",
+                    "audio",
+                    "file"
                   ]
                 }
               },

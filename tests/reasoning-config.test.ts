@@ -131,6 +131,17 @@ test('OpenAIProxy excludes embeddings-only providers from chat fallback routing'
   }
 });
 
+test('OpenAIProxy ranks fallback models with fast model hints before heavier preview models', () => {
+  const proxy = new OpenAIProxy() as any;
+  const config = baseProviderConfig([
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite',
+  ]);
+
+  const candidates = proxy.getCandidateModelsForProvider(config, 'claude-sonnet-4-20250514');
+  expect(candidates[0]).toBe('gemini-3.1-flash-lite');
+});
+
 test('AnthropicProxy excludes embeddings-only providers from message routing fallback', () => {
   const proxy = new AnthropicProxy() as any;
   const originalOpenAI = CONFIG.models.openai;
@@ -153,6 +164,65 @@ test('AnthropicProxy excludes embeddings-only providers from message routing fal
   try {
     const backends = proxy.getBackendsForModel('unknown-model');
     expect(backends.map((backend: any) => backend.id)).toEqual(['text-only']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('AnthropicProxy filters message routing by required media modalities', () => {
+  const proxy = new AnthropicProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      modalities: ['text'],
+    },
+    {
+      ...baseProviderConfig(['vision-model']),
+      id: 'vision',
+      embeddings: false,
+      modalities: ['text', 'image'],
+    },
+  ] as any;
+
+  try {
+    const modalities = proxy.getRequiredModalities({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+            { type: 'text', text: 'describe' },
+          ],
+        },
+      ],
+    });
+    const backends = proxy.getBackendsForModel('unknown-model', modalities);
+    expect(modalities).toEqual(['text', 'image']);
+    expect(backends.map((backend: any) => backend.id)).toEqual(['vision']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('AnthropicProxy treats omitted modalities as text image audio file capable', () => {
+  const proxy = new AnthropicProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['default-modalities-model']),
+      id: 'default-modalities',
+      embeddings: false,
+    },
+  ] as any;
+
+  try {
+    const backends = proxy.getBackendsForModel('unknown-model', ['text', 'image']);
+    expect(backends.map((backend: any) => backend.id)).toEqual(['default-modalities']);
   } finally {
     CONFIG.models.openai = originalOpenAI;
   }
