@@ -369,6 +369,8 @@ function processAssistantContentBlocks(
         const thoughtSignature = ( block as { _google?: { thought_signature?: string } } )?._google?.thought_signature
             || ( block as { extra_content?: { google?: { thought_signature?: string } } } )?.extra_content?.google?.thought_signature
             || FALLBACK_SIG;
+        (toolCall as any).thought_signature = thoughtSignature;
+        (toolCall as any).function.thought_signature = thoughtSignature;
         (toolCall as any).extra_content = {
             google: {
                 thought_signature: thoughtSignature,

@@ -1293,13 +1293,17 @@ export class OpenAIProxy {
                     || toolCall.function?.thought_signature;
 
                 if ( existingSig ) {
-                    // Ensure it's in the right location
-                    if ( toolCall.extra_content?.google?.thought_signature ) {
+                    if ( toolCall.extra_content?.google?.thought_signature && toolCall.function?.thought_signature ) {
                         return toolCall;
                     }
                     changed = true;
                     return {
                         ...toolCall,
+                        thought_signature: existingSig,
+                        function: {
+                            ...( toolCall.function || {} ),
+                            thought_signature: existingSig,
+                        },
                         extra_content: {
                             ...( toolCall.extra_content || {} ),
                             google: {
@@ -1313,6 +1317,11 @@ export class OpenAIProxy {
                 changed = true;
                 return {
                     ...toolCall,
+                    thought_signature: FALLBACK_SIG,
+                    function: {
+                        ...( toolCall.function || {} ),
+                        thought_signature: FALLBACK_SIG,
+                    },
                     extra_content: {
                         ...( toolCall.extra_content || {} ),
                         google: {
