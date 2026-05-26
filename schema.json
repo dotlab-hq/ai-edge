@@ -338,24 +338,59 @@
                           "additionalProperties": false
                         },
                         "modalities": {
-                          "default": [
-                            "text",
-                            "image",
-                            "audio",
-                            "file"
-                          ],
-                          "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
-                          "minItems": 1,
-                          "type": "array",
-                          "items": {
-                            "type": "string",
-                            "enum": [
+                          "default": {
+                            "input": [
                               "text",
                               "image",
                               "audio",
                               "file"
+                            ],
+                            "output": [
+                              "text"
                             ]
-                          }
+                          },
+                          "description": "Modalities this provider or model supports. Used for the model listing endpoint.",
+                          "type": "object",
+                          "properties": {
+                            "input": {
+                              "default": [
+                                "text",
+                                "image",
+                                "audio",
+                                "file"
+                              ],
+                              "description": "Input modalities this provider or model accepts",
+                              "minItems": 1,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "image",
+                                  "audio",
+                                  "file",
+                                  "pdf"
+                                ]
+                              }
+                            },
+                            "output": {
+                              "default": [
+                                "text"
+                              ],
+                              "description": "Output modalities this provider or model can produce",
+                              "minItems": 1,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "audio"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [],
+                          "additionalProperties": false
                         },
                         "reasoning_efforts": {
                           "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
@@ -396,24 +431,59 @@
                 }
               },
               "modalities": {
-                "default": [
-                  "text",
-                  "image",
-                  "audio",
-                  "file"
-                ],
-                "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
-                "minItems": 1,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "enum": [
+                "default": {
+                  "input": [
                     "text",
                     "image",
                     "audio",
                     "file"
+                  ],
+                  "output": [
+                    "text"
                   ]
-                }
+                },
+                "description": "Modalities this provider or model supports. Used for the model listing endpoint.",
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "default": [
+                      "text",
+                      "image",
+                      "audio",
+                      "file"
+                    ],
+                    "description": "Input modalities this provider or model accepts",
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "image",
+                        "audio",
+                        "file",
+                        "pdf"
+                      ]
+                    }
+                  },
+                  "output": {
+                    "default": [
+                      "text"
+                    ],
+                    "description": "Output modalities this provider or model can produce",
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "audio"
+                      ]
+                    }
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
               },
               "imageModels": {
                 "description": "Provider image routing flags. Explicitly set image_generation and/or image_editing to enable those endpoints.",
@@ -565,24 +635,59 @@
                           "additionalProperties": false
                         },
                         "modalities": {
-                          "default": [
-                            "text",
-                            "image",
-                            "audio",
-                            "file"
-                          ],
-                          "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
-                          "minItems": 1,
-                          "type": "array",
-                          "items": {
-                            "type": "string",
-                            "enum": [
+                          "default": {
+                            "input": [
                               "text",
                               "image",
                               "audio",
                               "file"
+                            ],
+                            "output": [
+                              "text"
                             ]
-                          }
+                          },
+                          "description": "Modalities this provider or model supports. Used for the model listing endpoint.",
+                          "type": "object",
+                          "properties": {
+                            "input": {
+                              "default": [
+                                "text",
+                                "image",
+                                "audio",
+                                "file"
+                              ],
+                              "description": "Input modalities this provider or model accepts",
+                              "minItems": 1,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "image",
+                                  "audio",
+                                  "file",
+                                  "pdf"
+                                ]
+                              }
+                            },
+                            "output": {
+                              "default": [
+                                "text"
+                              ],
+                              "description": "Output modalities this provider or model can produce",
+                              "minItems": 1,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "audio"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [],
+                          "additionalProperties": false
                         },
                         "reasoning_efforts": {
                           "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
@@ -623,24 +728,59 @@
                 }
               },
               "modalities": {
-                "default": [
-                  "text",
-                  "image",
-                  "audio",
-                  "file"
-                ],
-                "description": "Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.",
-                "minItems": 1,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "enum": [
+                "default": {
+                  "input": [
                     "text",
                     "image",
                     "audio",
                     "file"
+                  ],
+                  "output": [
+                    "text"
                   ]
-                }
+                },
+                "description": "Modalities this provider or model supports. Used for the model listing endpoint.",
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "default": [
+                      "text",
+                      "image",
+                      "audio",
+                      "file"
+                    ],
+                    "description": "Input modalities this provider or model accepts",
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "image",
+                        "audio",
+                        "file",
+                        "pdf"
+                      ]
+                    }
+                  },
+                  "output": {
+                    "default": [
+                      "text"
+                    ],
+                    "description": "Output modalities this provider or model can produce",
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "audio"
+                      ]
+                    }
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
               },
               "individualLimit": {
                 "default": false,

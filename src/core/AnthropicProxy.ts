@@ -16,7 +16,7 @@ import { ProviderStatsTracker } from './ProviderStatsTracker';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
-type Modality = NonNullable<OpenAIModelConfig['modalities']>[number];
+type Modality = OpenAIModelConfig['modalities']['input'][number];
 const AUTO_MODEL_ID = 'auto';
 const DEFAULT_MODALITIES: readonly Modality[] = ['text', 'image', 'audio', 'file'];
 
@@ -545,7 +545,7 @@ export class AnthropicProxy {
   }
 
   private providerSupportsModalities( config: OpenAIModelConfig, requiredModalities: readonly Modality[] ): boolean {
-    const providerModalities = new Set( config.modalities ?? DEFAULT_MODALITIES );
+    const providerModalities = new Set( config.modalities?.input ?? DEFAULT_MODALITIES );
     return requiredModalities.every( modality => providerModalities.has( modality ) )
       || config.models.some( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) );
   }
@@ -560,8 +560,8 @@ export class AnthropicProxy {
 
   private modelEntrySupportsModalities( config: OpenAIModelConfig, model: OpenAIModelConfig['models'][number], requiredModalities: readonly Modality[] ): boolean {
     const modalities = new Set( typeof model === 'object'
-      ? ( model.modalities ?? config.modalities ?? DEFAULT_MODALITIES )
-      : ( config.modalities ?? DEFAULT_MODALITIES ) );
+      ? ( model.modalities?.input ?? config.modalities?.input ?? DEFAULT_MODALITIES )
+      : ( config.modalities?.input ?? DEFAULT_MODALITIES ) );
     return requiredModalities.every( modality => modalities.has( modality ) );
   }
 

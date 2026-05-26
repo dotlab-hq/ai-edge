@@ -4,6 +4,8 @@ import { schema } from "@/schema";
 const jsonSchema = schema.toJSONSchema();
 
 removeOptionalDefaultFromRequired(jsonSchema, 'modalities');
+removeOptionalDefaultFromRequired(jsonSchema, 'input');
+removeOptionalDefaultFromRequired(jsonSchema, 'output');
 
 await writeFile("schema.json", JSON.stringify(jsonSchema, null, 2));
 

@@ -178,13 +178,13 @@ test('AnthropicProxy filters message routing by required media modalities', () =
       ...baseProviderConfig(['text-model']),
       id: 'text-only',
       embeddings: false,
-      modalities: ['text'],
+      modalities: { input: ['text'], output: ['text'] },
     },
     {
       ...baseProviderConfig(['vision-model']),
       id: 'vision',
       embeddings: false,
-      modalities: ['text', 'image'],
+      modalities: { input: ['text', 'image'], output: ['text'] },
     },
   ] as any;
 

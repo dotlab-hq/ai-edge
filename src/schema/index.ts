@@ -17,12 +17,12 @@ const ImageModelsSchema = z.object( {
 const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for embeddings routing and excluded from chat/completions/responses fallback' )
 
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
-const ModalitySchema = z.enum( ['text', 'image', 'audio', 'file'] )
-const ModalitiesSchema = z.array( ModalitySchema )
-  .min( 1, 'modalities must contain at least one modality' )
-  .optional()
-  .default( ['text', 'image', 'audio', 'file'] )
-  .describe( 'Modalities this provider or model accepts. Defaults to all: text, image, audio, and file.' )
+const InputModalitySchema = z.enum( ['text', 'image', 'audio', 'file', 'pdf'] )
+const OutputModalitySchema = z.enum( ['text', 'audio'] )
+const ModalitiesSchema = z.object( {
+  input: z.array( InputModalitySchema ).min( 1, 'input must contain at least one modality' ).optional().default( ['text', 'image', 'audio', 'file'] ).describe( 'Input modalities this provider or model accepts' ),
+  output: z.array( OutputModalitySchema ).min( 1, 'output must contain at least one modality' ).optional().default( ['text'] ).describe( 'Output modalities this provider or model can produce' ),
+} ).optional().default( { input: ['text', 'image', 'audio', 'file'], output: ['text'] } ).describe( 'Modalities this provider or model supports. Used for the model listing endpoint.' )
 
 const ReasoningConfigFields = {
   reasoning_efforts: z.array( ReasoningEffortSchema ).min( 1, 'reasoning_efforts must contain at least one effort' ).optional().describe( 'Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.' ),

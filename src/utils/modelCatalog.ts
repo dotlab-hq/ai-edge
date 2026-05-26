@@ -319,6 +319,9 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                 supportedParameters.add( 'output_reasoning' );
             }
 
+            const inputModalities = config.modalities?.input ?? normalized.inputModalities;
+            const outputModalities = config.modalities?.output ?? normalized.outputModalities;
+
             const entry: UnifiedModelCatalogEntry = {
                 id: configMeta.id,
                 object: "model",
@@ -328,8 +331,8 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                 created: MODEL_CREATED_AT,
                 owned_by: 'ai-edge',
                 architecture: {
-                    input_modalities: normalized.inputModalities,
-                    output_modalities: normalized.outputModalities,
+                    input_modalities: inputModalities,
+                    output_modalities: outputModalities,
                     tokenizer: 'Other',
                 },
                 top_provider: {
