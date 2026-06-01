@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server';
 import net from 'node:net';
 import app from '../server';
+import { createNodeServerFactoryWithNoDelay } from './utils/proxyFetch';
 
 async function isPortAvailable( port: number ): Promise<boolean> {
     return new Promise( ( resolve ) => {
@@ -34,5 +35,5 @@ if ( port !== preferredPort ) {
     console.warn( `Requested port ${preferredPort} is busy. Using ${port} instead.` );
 }
 
-serve( { fetch: app.fetch, port } );
+serve( { fetch: app.fetch, port, createServer: createNodeServerFactoryWithNoDelay() } );
 console.log( `LLM Proxy dev server running on http://localhost:${port}` );

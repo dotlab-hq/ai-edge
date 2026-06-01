@@ -1,8 +1,11 @@
 const DEBUG_VALUES = new Set( ['1', 'true', 'yes', 'on'] );
-
-export function isDebugEnabled(): boolean {
+const _isDebugEnabled = ( () => {
     const raw = process.env.AI_EDGE_DEBUG?.trim().toLowerCase();
     return raw ? DEBUG_VALUES.has( raw ) : false;
+} )();
+
+export function isDebugEnabled(): boolean {
+    return _isDebugEnabled;
 }
 
 export function redactForLog( value: unknown ): unknown {

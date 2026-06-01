@@ -181,8 +181,6 @@ export class AnthropicProxy {
           continue;
         }
 
-        body.model = selectedModel;
-
         const tokens = this.calculateTokenCount( body );
         const rateLimit = this.getEffectiveRateLimit( config );
         const rateCheck = await rateLimitManager.checkAndConsume(
@@ -198,14 +196,11 @@ export class AnthropicProxy {
         }
 
         try {
-          const openAIRequest = this.ensureToolCallThoughtSignatures(
-            this.withReasoningEffort(
-              convertAnthropicRequestToOpenAI( body, selectedModel, 'native' ),
-              body,
-              config,
-              selectedModel
-            )
-          );
+          const convertedRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
+          const withReasoning = this.withReasoningEffort( convertedRequest, body, config, selectedModel );
+          const openAIRequest = this.isGeminiProvider( config )
+            ? this.ensureToolCallThoughtSignatures( withReasoning )
+            : withReasoning;
           const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
           const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
           const upstreamRequestStartedAt = Date.now();
@@ -217,7 +212,7 @@ export class AnthropicProxy {
             method: 'POST',
             headers: this.buildHeaders( config, openAIRequest.stream === true ),
             body: JSON.stringify( openAIRequest ),
-          }, CONFIG.proxy );
+          }, CONFIG.proxy, { skipTimeout: openAIRequest.stream === true } );
           const upstreamResponseReceivedAt = Date.now();
 
           backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
@@ -434,6 +429,15 @@ export class AnthropicProxy {
 
   private isEmbeddingsEnabled( config: OpenAIModelConfig ): boolean {
     return config.embeddings === true;
+  }
+
+  private isGeminiProvider( config: OpenAIModelConfig ): boolean {
+    const baseUrl = ( config.baseUrl || '' ).toLowerCase();
+    const id = ( config.id || '' ).toLowerCase();
+    const name = ( config.name || '' ).toLowerCase();
+    return baseUrl.includes( 'gemini' ) || baseUrl.includes( 'google' )
+      || id.includes( 'gemini' ) || id.includes( 'google' )
+      || name.includes( 'gemini' ) || name.includes( 'google' );
   }
 
   private getBackendConfigForModel( modelName: string ): OpenAIModelConfig {

@@ -13,7 +13,10 @@ import {
 
 type StreamWriter = {
     write: ( chunk: string ) => Promise<unknown>;
+    writeln?: ( chunk: string ) => Promise<unknown>;
 };
+
+type SseOut = string[];
 
 interface StreamToolCallState {
     id: string;
@@ -73,25 +76,39 @@ export async function streamOpenAIResponseAsAnthropic(
     requestStartedAt: number = Date.now()
 ): Promise<Response> {
     c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+    c.header( 'Transfer-Encoding', 'chunked' );
     c.header( 'Cache-Control', 'no-cache, no-transform' );
     c.header( 'Connection', 'keep-alive' );
     c.header( 'X-Accel-Buffering', 'no' );
 
     return stream( c, async ( streamWriter ) => {
-        await streamWriter.write( ': stream-start\n\n' );
         const reader = response.body?.getReader();
         if ( !reader ) {
-            await sendErrorEvent( streamWriter, new Error( 'Upstream response did not include a stream' ), originalModel );
+            const out: SseOut = [];
+            sendErrorEventSync( out, new Error( 'Upstream response did not include a stream' ) );
+            await streamWriter.write( out.join( '' ) );
             return;
         }
 
         const decoder = new TextDecoder();
         const state = createStreamState( originalModel, initialContentBlocks, requestStartedAt );
-        let buffer = '';
+        const bufferChunks: string[] = [];
+        let bufferLength = 0;
         let firstUpstreamChunkLogged = false;
+        let clientDisconnected = false;
+
+        const clientSignal = c.req.raw.signal;
+        const onClientAbort = () => {
+            clientDisconnected = true;
+            reader.cancel( 'client disconnected' ).catch( () => {} );
+        };
+        clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
         try {
-            while ( true ) {
+            const initialOut: SseOut = [': stream-start\n\n'];
+            flushOut( initialOut, streamWriter );
+
+            while ( !clientDisconnected ) {
                 const { done, value } = await reader.read();
                 if ( done ) {
                     break;
@@ -103,39 +120,80 @@ export async function streamOpenAIResponseAsAnthropic(
                         firstUpstreamChunkLogged = true;
                         console.info( `[anthropic-bridge] first_upstream_chunk model=${originalModel} firstByteMs=${Date.now() - requestStartedAt}` );
                     }
-                    
-                    buffer += decoded;
-                }
-                const { events, remainder } = consumeSseBlocks( buffer );
-                buffer = remainder;
 
+                    bufferChunks.push( decoded );
+                    bufferLength += decoded.length;
+                }
+
+                const joined = bufferChunks.length === 1 ? bufferChunks[0]! : bufferChunks.join( '' );
+                const { events, remainder } = consumeSseBlocks( joined );
+                bufferChunks.length = 0;
+                if ( remainder ) {
+                    bufferChunks.push( remainder );
+                }
+                bufferLength = remainder.length;
+
+                const out: SseOut = [];
                 for ( const eventBlock of events ) {
-                    await processSseBlock( eventBlock, state, streamWriter );
-                    if ( state.finished ) {
+                    const finished = processSseBlockSync( eventBlock, state, out );
+                    if ( finished ) {
+                        await flushOut( out, streamWriter );
+                        console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
+                        reader.releaseLock();
                         return;
                     }
                 }
+                if ( out.length ) {
+                    await flushOut( out, streamWriter );
+                }
             }
 
-            buffer += decoder.decode();
-            const { events } = consumeSseBlocks( buffer );
+            const tail = decoder.decode();
+            if ( tail ) {
+                bufferChunks.push( tail );
+            }
+            const joined = bufferChunks.length > 0 ? bufferChunks.join( '' ) : '';
+            const { events } = consumeSseBlocks( joined );
+            const out: SseOut = [];
             for ( const eventBlock of events ) {
-                await processSseBlock( eventBlock, state, streamWriter );
-                if ( state.finished ) {
+                const finished = processSseBlockSync( eventBlock, state, out );
+                if ( finished ) {
+                    await flushOut( out, streamWriter );
+                    console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
+                    reader.releaseLock();
                     return;
                 }
             }
 
             if ( !state.finished ) {
-                await finishStream( state, streamWriter );
+                finishStreamSync( state, out );
+            }
+            if ( out.length ) {
+                await flushOut( out, streamWriter );
             }
         } catch ( error: any ) {
-            await sendErrorEvent( streamWriter, error instanceof Error ? error : new Error( String( error ) ), originalModel );
+            const errOut: SseOut = [];
+            sendErrorEventSync( errOut, error instanceof Error ? error : new Error( String( error ) ) );
+            try {
+                await flushOut( errOut, streamWriter );
+            } catch {
+                /* ignore secondary error */
+            }
         } finally {
-            console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
-            reader.releaseLock();
+            clientSignal.removeEventListener( 'abort', onClientAbort );
+            if ( !clientDisconnected ) {
+                console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
+            }
+            try { reader.releaseLock(); } catch { /* ignore */ }
         }
     } );
+}
+
+async function flushOut( out: SseOut, streamWriter: StreamWriter ): Promise<void> {
+    if ( !out.length ) return;
+    const payload = out.join( '' );
+    out.length = 0;
+    await streamWriter.write( payload );
 }
 
 function createStreamState( originalModel: string, initialContentBlocks: Array<Record<string, any>> = [], requestStartedAt: number = Date.now() ): StreamState {
@@ -178,14 +236,14 @@ function consumeSseBlocks( buffer: string ): { events: string[]; remainder: stri
     };
 }
 
-async function processSseBlock( block: string, state: StreamState, streamWriter: StreamWriter ): Promise<void> {
+function processSseBlockSync( block: string, state: StreamState, out: SseOut ): boolean {
     const dataLines = block
         .split( '\n' )
         .map( ( line ) => line.trim() )
         .filter( ( line ) => line.startsWith( 'data:' ) );
 
     if ( !dataLines.length ) {
-        return;
+        return false;
     }
 
     const data = dataLines
@@ -194,23 +252,23 @@ async function processSseBlock( block: string, state: StreamState, streamWriter:
 
     if ( !data || data === '[DONE]' ) {
         if ( !state.finished ) {
-            await finishStream( state, streamWriter );
+            finishStreamSync( state, out );
         }
-        return;
+        return state.finished;
     }
 
     let chunk: OpenAIStreamChunk;
     try {
         chunk = JSON.parse( data ) as OpenAIStreamChunk;
     } catch {
-        return;
+        return false;
     }
 
-    await processOpenAIChunk( chunk, state, streamWriter );
+    return processOpenAIChunkSync( chunk, state, out );
 }
 
 
-async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState, streamWriter: StreamWriter ): Promise<void> {
+function processOpenAIChunkSync( chunk: OpenAIStreamChunk, state: StreamState, out: SseOut ): boolean {
     if ( chunk.usage ) {
         state.inputTokens = chunk.usage.prompt_tokens;
         state.outputTokens = chunk.usage.completion_tokens;
@@ -223,18 +281,18 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
 
     const choice = chunk.choices[0];
     if ( !choice ) {
-        return;
+        return false;
     }
 
     if ( !state.hasStarted ) {
-        await sendMessageStart( state, streamWriter );
+        sendMessageStartSync( state, out );
         state.hasStarted = true;
-        await emitInitialContentBlocks( state, streamWriter );
+        emitInitialContentBlocksSync( state, out );
     }
 
     const delta = choice.delta;
 
-    const reasoning = delta.reasoning || delta.reasoning_content;
+    const reasoning = ( delta as any ).reasoning || ( delta as any ).reasoning_content || ( delta as any ).thinking || ( delta as any ).thought || ( delta as any ).reasoning_text;
     if ( typeof delta.reasoning_signature === 'string' ) {
         state.reasoningSignature = delta.reasoning_signature;
     } else if ( typeof delta.signature === 'string' ) {
@@ -244,23 +302,23 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
     if ( reasoning ) {
         if ( !state.reasoningEmittedStart ) {
             if ( state.textBlockOpen ) {
-                await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+                sendContentBlockStopSync( state, state.contentBlockIndex, out );
                 state.textBlockOpen = false;
                 state.textContent = '';
                 state.contentBlockIndex++;
             }
-            await sendThinkingBlockStart( state, state.contentBlockIndex, streamWriter );
+            sendThinkingBlockStartSync( state, state.contentBlockIndex, out );
             state.reasoningBlockOpen = true;
             state.reasoningEmittedStart = true;
         }
-        await sendThinkingDelta( state, state.contentBlockIndex, reasoning, streamWriter );
+        sendThinkingDeltaSync( state, state.contentBlockIndex, reasoning, out );
     }
 
     if ( delta.content ) {
         if ( state.reasoningBlockOpen ) {
             const signature = getOrCreateThinkingSignature( state );
-            await sendSignatureDelta( state, state.contentBlockIndex, signature, streamWriter );
-            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            sendSignatureDeltaSync( state, state.contentBlockIndex, signature, out );
+            sendContentBlockStopSync( state, state.contentBlockIndex, out );
             state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
             state.contentBlockIndex++;
@@ -269,22 +327,22 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
         const existingType = state.openBlockTypes.get( state.contentBlockIndex );
         if ( !state.textBlockOpen || ( existingType && existingType !== 'text' ) ) {
             if ( state.textBlockOpen && existingType && existingType !== 'text' ) {
-                await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+                sendContentBlockStopSync( state, state.contentBlockIndex, out );
                 state.textBlockOpen = false;
                 state.textContent = '';
                 state.contentBlockIndex++;
             }
-            await sendContentBlockStart( state, state.contentBlockIndex, 'text', '', streamWriter );
+            sendContentBlockStartSync( state, state.contentBlockIndex, 'text', '', out );
             state.textBlockOpen = true;
         }
 
         state.textContent += delta.content;
-        await sendTextDelta( state, state.contentBlockIndex, delta.content, streamWriter );
+        sendTextDeltaSync( state, state.contentBlockIndex, delta.content, out );
     }
 
     if ( delta.tool_calls ) {
         for ( const toolCall of delta.tool_calls ) {
-            await processToolCallDelta( toolCall, state, streamWriter );
+            processToolCallDeltaSync( toolCall, state, out );
         }
     }
 
@@ -293,22 +351,22 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
 
         if ( state.reasoningBlockOpen ) {
             const signature = getOrCreateThinkingSignature( state );
-            await sendSignatureDelta( state, state.contentBlockIndex, signature, streamWriter );
-            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            sendSignatureDeltaSync( state, state.contentBlockIndex, signature, out );
+            sendContentBlockStopSync( state, state.contentBlockIndex, out );
             state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
             state.contentBlockIndex++;
         }
 
         if ( state.textBlockOpen ) {
-            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            sendContentBlockStopSync( state, state.contentBlockIndex, out );
             state.textBlockOpen = false;
             state.textContent = '';
             state.contentBlockIndex++;
         }
 
         for ( const toolCall of state.currentToolCalls.values() ) {
-            await sendContentBlockStop( state, toolCall.blockIndex, streamWriter );
+            sendContentBlockStopSync( state, toolCall.blockIndex, out );
         }
         if ( state.currentToolCalls.size > 0 ) {
             const maxToolIndex = Math.max( ...Array.from( state.currentToolCalls.values() ).map( ( toolCall ) => toolCall.blockIndex ) );
@@ -316,24 +374,26 @@ async function processOpenAIChunk( chunk: OpenAIStreamChunk, state: StreamState,
             state.currentToolCalls.clear();
         }
     }
+
+    return state.finished;
 }
 
-async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['choices'][number]['delta']['tool_calls']>[number], state: StreamState, streamWriter: StreamWriter ): Promise<void> {
+function processToolCallDeltaSync( toolCall: NonNullable<OpenAIStreamChunk['choices'][number]['delta']['tool_calls']>[number], state: StreamState, out: SseOut ): void {
     const index = toolCall.index;
     let currentCall = state.currentToolCalls.get( index );
 
     if ( !currentCall ) {
         if ( state.reasoningBlockOpen ) {
             const signature = getOrCreateThinkingSignature( state );
-            await sendSignatureDelta( state, state.contentBlockIndex, signature, streamWriter );
-            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            sendSignatureDeltaSync( state, state.contentBlockIndex, signature, out );
+            sendContentBlockStopSync( state, state.contentBlockIndex, out );
             state.reasoningBlockOpen = false;
             state.reasoningEmittedEnd = true;
             state.contentBlockIndex++;
         }
 
         if ( state.textBlockOpen ) {
-            await sendContentBlockStop( state, state.contentBlockIndex, streamWriter );
+            sendContentBlockStopSync( state, state.contentBlockIndex, out );
             state.textBlockOpen = false;
             state.textContent = '';
             state.contentBlockIndex++;
@@ -348,7 +408,7 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
                 blockIndex: state.contentBlockIndex + index,
             };
             state.currentToolCalls.set( index, currentCall );
-            await sendContentBlockStart( state, currentCall.blockIndex, 'tool_use', currentCall.name, streamWriter, currentCall.id );
+            sendContentBlockStartSync( state, currentCall.blockIndex, 'tool_use', currentCall.name, out, currentCall.id );
         }
     }
 
@@ -358,12 +418,12 @@ async function processToolCallDelta( toolCall: NonNullable<OpenAIStreamChunk['ch
 
     if ( toolCall.function?.arguments ) {
         currentCall.arguments += toolCall.function.arguments;
-        await sendInputJsonDelta( state, currentCall.blockIndex, toolCall.function.arguments, streamWriter );
+        sendInputJsonDeltaSync( state, currentCall.blockIndex, toolCall.function.arguments, out );
     }
 }
 
-async function sendMessageStart( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( state, streamWriter, {
+function sendMessageStartSync( state: StreamState, out: SseOut ): void {
+    sendSseEventSync( state, out, {
         type: 'message_start',
         message: {
             id: state.messageId,
@@ -389,14 +449,14 @@ async function sendMessageStart( state: StreamState, streamWriter: StreamWriter 
     } );
 }
 
-async function sendContentBlockStart(
+function sendContentBlockStartSync(
     state: StreamState | undefined,
     index: number,
     type: 'text' | 'tool_use',
     textOrName: string,
-    streamWriter: StreamWriter,
+    out: SseOut,
     id?: string
-): Promise<void> {
+): void {
     const contentBlock = type === 'text'
         ? { type: 'text', text: '' }
         : {
@@ -406,7 +466,7 @@ async function sendContentBlockStart(
             input: {},
         };
 
-    await sendSseEvent( state, streamWriter, {
+    sendSseEventSync( state, out, {
         type: 'content_block_start',
         index,
         content_block: contentBlock,
@@ -417,8 +477,8 @@ async function sendContentBlockStart(
     }
 }
 
-async function sendThinkingBlockStart( state: StreamState, index: number, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( state, streamWriter, {
+function sendThinkingBlockStartSync( state: StreamState, index: number, out: SseOut ): void {
+    sendSseEventSync( state, out, {
         type: 'content_block_start',
         index,
         content_block: {
@@ -430,7 +490,7 @@ async function sendThinkingBlockStart( state: StreamState, index: number, stream
     state.openBlockTypes.set( index, 'thinking' );
 }
 
-async function emitInitialContentBlocks( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
+function emitInitialContentBlocksSync( state: StreamState, out: SseOut ): void {
     if ( state.initialContentBlocksEmitted || !state.initialContentBlocks.length ) {
         return;
     }
@@ -438,7 +498,7 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
     for ( const block of state.initialContentBlocks ) {
         const index = state.contentBlockIndex;
 
-        await sendSseEvent( state, streamWriter, {
+        sendSseEventSync( state, out, {
             type: 'content_block_start',
             index,
             content_block: block,
@@ -449,7 +509,7 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
         }
 
         if ( block?.type === 'server_tool_use' && block?.input && typeof block.input === 'object' ) {
-            await sendSseEvent( state, streamWriter, {
+            sendSseEventSync( state, out, {
                 type: 'content_block_delta',
                 index,
                 delta: {
@@ -459,19 +519,19 @@ async function emitInitialContentBlocks( state: StreamState, streamWriter: Strea
             } );
         }
 
-        await sendContentBlockStop( state, index, streamWriter );
+        sendContentBlockStopSync( state, index, out );
         state.contentBlockIndex += 1;
     }
 
     state.initialContentBlocksEmitted = true;
 }
 
-async function sendTextDelta( state: StreamState | undefined, index: number, text: string, streamWriter: StreamWriter ): Promise<void> {
+function sendTextDeltaSync( state: StreamState | undefined, index: number, text: string, out: SseOut ): void {
     if ( state && state.openBlockTypes.get( index ) !== 'text' ) {
         return;
     }
 
-    await sendSseEvent( state, streamWriter, {
+    sendSseEventSync( state, out, {
         type: 'content_block_delta',
         index,
         delta: {
@@ -481,12 +541,12 @@ async function sendTextDelta( state: StreamState | undefined, index: number, tex
     } );
 }
 
-async function sendThinkingDelta( state: StreamState | undefined, index: number, thinking: string, streamWriter: StreamWriter ): Promise<void> {
+function sendThinkingDeltaSync( state: StreamState | undefined, index: number, thinking: string, out: SseOut ): void {
     if ( state && state.openBlockTypes.get( index ) !== 'thinking' ) {
         return;
     }
 
-    await sendSseEvent( state, streamWriter, {
+    sendSseEventSync( state, out, {
         type: 'content_block_delta',
         index,
         delta: {
@@ -496,8 +556,8 @@ async function sendThinkingDelta( state: StreamState | undefined, index: number,
     } );
 }
 
-async function sendSignatureDelta( state: StreamState | undefined, index: number, signature: string, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( state, streamWriter, {
+function sendSignatureDeltaSync( state: StreamState | undefined, index: number, signature: string, out: SseOut ): void {
+    sendSseEventSync( state, out, {
         type: 'content_block_delta',
         index,
         delta: {
@@ -517,7 +577,7 @@ function getOrCreateThinkingSignature( state: StreamState ): string {
     return signature;
 }
 
-async function sendInputJsonDelta( state: StreamState | undefined, index: number, partialJson: string, streamWriter: StreamWriter ): Promise<void> {
+function sendInputJsonDeltaSync( state: StreamState | undefined, index: number, partialJson: string, out: SseOut ): void {
     if ( state ) {
         const blockType = state.openBlockTypes.get( index );
         if ( blockType !== 'tool_use' && blockType !== 'server_tool_use' ) {
@@ -525,7 +585,7 @@ async function sendInputJsonDelta( state: StreamState | undefined, index: number
         }
     }
 
-    await sendSseEvent( state, streamWriter, {
+    sendSseEventSync( state, out, {
         type: 'content_block_delta',
         index,
         delta: {
@@ -535,8 +595,8 @@ async function sendInputJsonDelta( state: StreamState | undefined, index: number
     } );
 }
 
-async function sendContentBlockStop( state: StreamState | undefined, index: number, streamWriter: StreamWriter ): Promise<void> {
-    await sendSseEvent( state, streamWriter, {
+function sendContentBlockStopSync( state: StreamState | undefined, index: number, out: SseOut ): void {
+    sendSseEventSync( state, out, {
         type: 'content_block_stop',
         index,
     } );
@@ -546,7 +606,7 @@ async function sendContentBlockStop( state: StreamState | undefined, index: numb
     }
 }
 
-async function finishStream( state: StreamState, streamWriter: StreamWriter ): Promise<void> {
+function finishStreamSync( state: StreamState, out: SseOut ): void {
     if ( state.finished ) {
         return;
     }
@@ -554,7 +614,7 @@ async function finishStream( state: StreamState, streamWriter: StreamWriter ): P
     state.finished = true;
 
     const stopReason = mapStopReason( state.lastFinishReason );
-    await sendSseEvent( state, streamWriter, {
+    sendSseEventSync( state, out, {
         type: 'message_delta',
         delta: {
             stop_reason: stopReason,
@@ -573,11 +633,11 @@ async function finishStream( state: StreamState, streamWriter: StreamWriter ): P
         },
     } );
 
-    await sendSseEvent( state, streamWriter, { type: 'message_stop' } );
+    sendSseEventSync( state, out, { type: 'message_stop' } );
 }
 
-async function sendErrorEvent( streamWriter: StreamWriter, error: Error, originalModel: string ): Promise<void> {
-    await sendSseEvent( undefined, streamWriter, {
+function sendErrorEventSync( out: SseOut, error: Error ): void {
+    sendSseEventSync( undefined, out, {
         type: 'error',
         error: {
             type: 'api_error',
@@ -585,19 +645,18 @@ async function sendErrorEvent( streamWriter: StreamWriter, error: Error, origina
         },
     } );
 
-    await sendSseEvent( undefined, streamWriter, {
+    sendSseEventSync( undefined, out, {
         type: 'message_stop',
     } );
 }
 
-async function sendSseEvent( state: StreamState | undefined, streamWriter: StreamWriter, data: Record<string, any> ): Promise<void> {
+function sendSseEventSync( state: StreamState | undefined, out: SseOut, data: Record<string, any> ): void {
     if ( state && !state.firstSseEmissionLogged ) {
         state.firstSseEmissionLogged = true;
         console.info( `[anthropic-bridge] first_downstream_event model=${state.model} firstTokenMs=${Date.now() - state.streamStartedAt}` );
     }
 
-    const payload = `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n`;
-    await streamWriter.write( payload );
+    out.push( `event: ${data.type}\ndata: ${JSON.stringify( data )}\n\n` );
 }
 
 function mapStopReason( reason: OpenAIStreamChunk['choices'][number]['finish_reason'] | null ): AnthropicMessageResponse['stop_reason'] {

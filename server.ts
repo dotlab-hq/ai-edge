@@ -9,7 +9,10 @@ import { getUnifiedModelCatalog, refreshUnifiedModelCatalog } from "./src/utils/
 import { getUpstreamConnectionPoolStats, warmUpstreamConnection } from "./src/utils/proxyFetch";
 
 const app = new Hono()
-app.use( logger() )
+
+if ( process.env.AI_EDGE_DEBUG?.trim() ) {
+    app.use( logger() )
+}
 
 const requiredAccessKey = process.env.AI_EDGE_KEY?.trim();
 

@@ -1,4 +1,5 @@
 import { Agent, fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
+import http from 'node:http';
 
 const proxyAgentCache = new Map<string, ProxyAgent>();
 const originAgentCache = new Map<string, Agent>();
@@ -8,10 +9,11 @@ const DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_CONNECTIONS_PER_ORIGIN = 16;
 const CACHE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_CACHE_SIZE = 100;
+const KEEP_ALIVE_ENABLE_MS = 30_000;
 
 // Start periodic cleanup of agent caches
-setInterval( cleanupAgentCaches, CACHE_CLEANUP_INTERVAL_MS );
-// Start periodic cleanup of agent caches
+const cleanupTimer = setInterval( cleanupAgentCaches, CACHE_CLEANUP_INTERVAL_MS );
+cleanupTimer.unref?.();
 
 function getEnvProxyUrl(): string | undefined {
     return process.env.HTTPS_PROXY
@@ -60,8 +62,9 @@ function getOriginAgent( origin: string ): Agent {
         bodyTimeout: 0,
         keepAliveTimeout: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_KEEP_ALIVE_TIMEOUT_MS', DEFAULT_KEEP_ALIVE_TIMEOUT_MS ),
         keepAliveMaxTimeout: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_KEEP_ALIVE_MAX_TIMEOUT_MS', DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS ),
-        keepAliveTimeoutThreshold: 1_000,
+        keepAliveTimeoutThreshold: getConfiguredPositiveInt( 'AI_EDGE_UPSTREAM_KEEP_ALIVE_THRESHOLD_MS', 30_000 ),
         pipelining: 1,
+        allowH2: true,
     } );
     originAgentCache.set( origin, agent );
     return agent;
@@ -99,11 +102,15 @@ type FetchInput = Parameters<typeof undiciFetch>[0];
 
 type ProxyAwareFetch = ( input: FetchInput, init?: RequestInit ) => Promise<Response>;
 
+type FetchWithProxyOptions = {
+    skipTimeout?: boolean;
+};
+
 const proxyAwareFetch = undiciFetch as unknown as ProxyAwareFetch;
 
-export async function fetchWithProxy( input: FetchInput, init?: RequestInit, proxyUrl?: string ): Promise<Response> {
+export async function fetchWithProxy( input: FetchInput, init?: RequestInit, proxyUrl?: string, options?: FetchWithProxyOptions ): Promise<Response> {
     const resolvedProxyUrl = normalizeProxyUrl( proxyUrl );
-    const timeoutMs = getConfiguredTimeoutMs();
+    const timeoutMs = options?.skipTimeout ? 0 : getConfiguredTimeoutMs();
     const controller = new AbortController();
     const upstreamSignal = init?.signal;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -234,4 +241,29 @@ function getUrlFromInput( input: FetchInput ): URL | undefined {
     } catch {
         return undefined;
     }
+}
+
+type NodeRequestListener = ( req: http.IncomingMessage, res: http.ServerResponse ) => void;
+
+export function createNodeServerWithNoDelay( requestListener?: NodeRequestListener ): http.Server {
+    return http.createServer( ( req, res ) => {
+        const socket = res.socket;
+        if ( socket ) {
+            socket.setNoDelay( true );
+            socket.setKeepAlive( true, KEEP_ALIVE_ENABLE_MS );
+        }
+        if ( requestListener ) {
+            requestListener( req, res );
+        }
+    } );
+}
+
+export function createNodeServerFactoryWithNoDelay(): typeof http.createServer {
+    const factory = ( ( ...args: any[] ) => {
+        if ( typeof args[0] === 'function' ) {
+            return createNodeServerWithNoDelay( args[0] as NodeRequestListener );
+        }
+        return createNodeServerWithNoDelay();
+    } ) as unknown as typeof http.createServer;
+    return factory;
 }

@@ -6,6 +6,7 @@ import { access } from 'node:fs/promises';
 import { serve } from '@hono/node-server';
 import { decodeConfigFromEnv, readConfig } from '../../utils/readConfig';
 import { getConfigFileName } from '../utils/template';
+import { createNodeServerFactoryWithNoDelay } from '../../utils/proxyFetch';
 
 const DEFAULT_PORT = 25789;
 
@@ -121,7 +122,7 @@ Debug: ${debugEnabled ? 'enabled' : 'disabled'}`,
     try {
       const { default: app } = await import( '../../../server' );
 
-      serve( { fetch: app.fetch, port: portNum } );
+      serve( { fetch: app.fetch, port: portNum, createServer: createNodeServerFactoryWithNoDelay() } );
 
       s2.stop( `✅ Server running on http://localhost:${portNum}` );
 

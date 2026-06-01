@@ -32,7 +32,10 @@ export class OpenAIProxy {
     private app: Hono;
     private readonly rrIndexByKey = new Map<string, number>();
     private readonly providerStats = new ProviderStatsTracker();
+    private readonly backendRouteCache = new Map<string, OpenAIModelConfig[]>();
+    private readonly optimizedBackendCache = new Map<string, { backends: OpenAIModelConfig[]; expiresAt: number }>();
     private static readonly MAX_CACHE_SIZE = 1000;
+    private static readonly BACKEND_CACHE_TTL_MS = 30_000;
 
     constructor() {
         this.app = new Hono();
@@ -254,10 +257,11 @@ export class OpenAIProxy {
                     continue;
                 }
 
-                body.model = selectedModel;
-                const upstreamBody = this.ensureToolCallThoughtSignatures(
-                    this.withReasoningEffort( body, config, selectedModel )
-                );
+                const requestWithModel = { ...body, model: selectedModel };
+                const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
+                const upstreamBody = this.isGeminiProvider( config )
+                    ? this.ensureToolCallThoughtSignatures( withReasoning )
+                    : withReasoning;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
                 const rateLimit = this.getEffectiveRateLimit( config );
@@ -285,7 +289,7 @@ export class OpenAIProxy {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
                         body: JSON.stringify( upstreamBody ),
-                    }, CONFIG.proxy );
+                    }, CONFIG.proxy, { skipTimeout: upstreamBody.stream === true } );
                     upstreamResponseReceivedAt = Date.now();
 
                     backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
@@ -299,8 +303,7 @@ export class OpenAIProxy {
                         if ( location ) {
                             const redirectModel = this.extractModelFromLocation( location );
                             if ( redirectModel && redirectModel !== modelName ) {
-                                body.model = redirectModel;
-                                return this.proxyRequest( c, endpoint, redirectDepth + 1, body );
+                                return this.proxyRequest( c, endpoint, redirectDepth + 1, { ...body, model: redirectModel } );
                             }
                         }
                     }
@@ -308,6 +311,7 @@ export class OpenAIProxy {
                     // Handle streaming responses
                     if ( upstreamBody.stream === true ) {
                         c.header( 'Content-Type', 'text/event-stream' );
+                        c.header( 'Transfer-Encoding', 'chunked' );
                         c.header( 'Cache-Control', 'no-cache, no-transform' );
                         c.header( 'Connection', 'keep-alive' );
                         c.header( 'X-Accel-Buffering', 'no' );
@@ -329,27 +333,44 @@ export class OpenAIProxy {
                                 const reader = response.body!.getReader();
                                 const decoder = new TextDecoder();
                                 let firstChunkLogged = false;
+                                let clientDisconnected = false;
+
+                                const clientSignal = c.req.raw.signal;
+                                const onClientAbort = () => {
+                                    clientDisconnected = true;
+                                    reader.cancel( 'client disconnected' ).catch( () => {} );
+                                };
+                                clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
                                 try {
-                                    while ( true ) {
+                                    while ( !clientDisconnected ) {
                                         const { done, value } = await reader.read();
                                         if ( done ) break;
                                         if ( value && !firstChunkLogged ) {
                                             firstChunkLogged = true;
                                             console.info( `[${endpoint}] stream_first_chunk provider=${config.id} model=${selectedModel} firstByteMs=${Date.now() - upstreamResponseReceivedAt}` );
                                         }
-                                        const chunk = decoder.decode( value, { stream: true } );
-                                        await streamWriter.write( chunk );
+                                        if ( value ) {
+                                            const chunk = decoder.decode( value, { stream: true } );
+                                            if ( chunk ) {
+                                                await streamWriter.write( chunk );
+                                            }
+                                        }
                                     }
 
-                                    const tail = decoder.decode();
-                                    if ( tail ) {
-                                        await streamWriter.write( tail );
+                                    if ( !clientDisconnected ) {
+                                        const tail = decoder.decode();
+                                        if ( tail ) {
+                                            await streamWriter.write( tail );
+                                        }
                                     }
 
-                                    console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+                                    if ( !clientDisconnected ) {
+                                        console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+                                    }
                                 } finally {
-                                    reader.releaseLock();
+                                    clientSignal.removeEventListener( 'abort', onClientAbort );
+                                    try { reader.releaseLock(); } catch { /* ignore */ }
                                 }
                             }, async ( err, streamWriter ) => {
                                 console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
@@ -938,6 +959,12 @@ export class OpenAIProxy {
     }
 
     private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
+        const cacheKey = `${modelName}|${endpoint ?? ''}`;
+        const cached = this.backendRouteCache.get( cacheKey );
+        if ( cached ) {
+            return cached;
+        }
+
         const configs = CONFIG.models.openai ?? [];
         const isAutoModel = this.isAutoModel( modelName );
         const modelIsListed = configs.some( config =>
@@ -969,11 +996,18 @@ export class OpenAIProxy {
             }
         }
 
-        if ( isAutoModel ) {
-            return fallbackBackends;
-        }
+        const result = isAutoModel
+            ? fallbackBackends
+            : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
 
-        return modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+        if ( this.backendRouteCache.size > OpenAIProxy.MAX_CACHE_SIZE ) {
+            const firstKey = this.backendRouteCache.keys().next().value;
+            if ( firstKey ) {
+                this.backendRouteCache.delete( firstKey );
+            }
+        }
+        this.backendRouteCache.set( cacheKey, result );
+        return result;
     }
 
     private isAutoModel( modelName: string ): boolean {
@@ -1010,6 +1044,15 @@ export class OpenAIProxy {
         return imageModels?.image_generation === true || imageModels?.image_editing === true;
     }
 
+    private isGeminiProvider( config: OpenAIModelConfig ): boolean {
+        const baseUrl = ( config.baseUrl || '' ).toLowerCase();
+        const id = ( config.id || '' ).toLowerCase();
+        const name = ( config.name || '' ).toLowerCase();
+        return baseUrl.includes( 'gemini' ) || baseUrl.includes( 'google' )
+            || id.includes( 'gemini' ) || id.includes( 'google' )
+            || name.includes( 'gemini' ) || name.includes( 'google' );
+    }
+
     private getRoundRobinBackends( modelName: string, backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
         if ( backends.length <= 1 ) {
             return backends;
@@ -1024,10 +1067,34 @@ export class OpenAIProxy {
     }
 
     private getOptimizedBackends( modelName: string, endpoint: string | undefined, backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
-        const rotated = this.getRoundRobinBackends( `${endpoint ?? 'default'}:${modelName}`, backends );
-        return rotated.sort( ( left, right ) =>
+        if ( backends.length <= 1 ) {
+            return backends;
+        }
+
+        const cacheKey = `${endpoint ?? 'default'}:${modelName}`;
+        const cached = this.optimizedBackendCache.get( cacheKey );
+        if ( cached && cached.expiresAt > Date.now() ) {
+            return cached.backends;
+        }
+
+        const rotated = this.getRoundRobinBackends( cacheKey, backends );
+        const sorted = rotated.sort( ( left, right ) =>
             this.scoreProvider( right, modelName ) - this.scoreProvider( left, modelName )
         );
+
+        this.optimizedBackendCache.set( cacheKey, {
+            backends: sorted,
+            expiresAt: Date.now() + OpenAIProxy.BACKEND_CACHE_TTL_MS,
+        });
+
+        if ( this.optimizedBackendCache.size > OpenAIProxy.MAX_CACHE_SIZE ) {
+            const firstKey = this.optimizedBackendCache.keys().next().value;
+            if ( firstKey ) {
+                this.optimizedBackendCache.delete( firstKey );
+            }
+        }
+
+        return sorted;
     }
 
     private scoreProvider( config: OpenAIModelConfig, requestedModel: string ): number {
