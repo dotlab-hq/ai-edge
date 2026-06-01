@@ -590,6 +590,10 @@ export class AnthropicProxy {
       return this.stripReasoningFields( openAIRequest );
     }
 
+    if ( openAIRequest?.stream === true && !this.hasExplicitReasoningRequest( sourceBody ) ) {
+      return openAIRequest;
+    }
+
     const effort = this.resolveReasoningEffort( sourceBody, config, selectedModel );
     if ( !effort || effort === 'none' ) {
       return openAIRequest;
@@ -599,6 +603,14 @@ export class AnthropicProxy {
       ...openAIRequest,
       reasoning_effort: effort,
     };
+  }
+
+  private hasExplicitReasoningRequest( body: any ): boolean {
+    return typeof body?.reasoning_effort === 'string'
+      || typeof body?.reasoning?.effort === 'string'
+      || typeof body?.thinking?.effort === 'string'
+      || body?.include_reasoning === true
+      || body?.output_reasoning === true;
   }
 
   private resolveReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): ReasoningEffort | undefined {

@@ -22,6 +22,12 @@ import {
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
+import {
+    convertResponsesRequestToChat,
+    convertChatResponseToResponses,
+    createResponsesStreamState,
+    processChatStreamChunkForResponses,
+} from './ResponsesConversion';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -105,6 +111,12 @@ export class OpenAIProxy {
 
         if ( this.shouldUseOpenAICodeInterpreter( normalizedBody ) ) {
             return this.proxyCodeInterpreterRequest( c, endpoint, normalizedBody );
+        }
+
+        // Convert Responses API body to chat/completions format for upstream backends
+        if ( endpoint === 'responses' ) {
+            const converted = convertResponsesRequestToChat( normalizedBody );
+            return this.proxyRequest( c, 'chat/completions', 1, converted, normalizedBody );
         }
 
         return this.proxyRequest( c, endpoint, 1, normalizedBody );
@@ -194,7 +206,7 @@ export class OpenAIProxy {
         return CONFIG.rateLimit;
     }
 
-    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1, rawBody?: any ): Promise<any> {
+    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1, rawBody?: any, originalResponsesBody?: any ): Promise<any> {
         const requestStartedAt = Date.now();
         let bodyParsedAt = requestStartedAt;
         let webSearchCompletedAt = requestStartedAt;
@@ -329,6 +341,12 @@ export class OpenAIProxy {
                         if ( response.body ) {
                             console.info( `[${endpoint}] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
                             this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+
+                            // Responses API: convert chat SSE chunks to Responses SSE format
+                            if ( originalResponsesBody ) {
+                                return this.streamResponsesConverted( c, response, originalResponsesBody, config.id, selectedModel, requestStartedAt );
+                            }
+
                             return stream( c, async ( streamWriter ) => {
                                 const reader = response.body!.getReader();
                                 const decoder = new TextDecoder();
@@ -399,7 +417,18 @@ export class OpenAIProxy {
                         continue;
                     }
 
-                    const enrichedPayload = this.attachUsageIfMissing( endpoint, upstreamBody, payload );
+                    // Convert chat/completions response back to Responses format if needed
+                    let finalPayload = payload;
+                    if ( originalResponsesBody ) {
+                        finalPayload = convertChatResponseToResponses( payload, originalResponsesBody );
+                        // Ensure usage is present using chat body for token counting (Responses payload has responses-format usage)
+                        finalPayload = this.attachUsageIfMissing( 'responses', originalResponsesBody, finalPayload );
+                        if ( isDebugEnabled() ) {
+                            console.info( `[responses→chat] converted_response body=${JSON.stringify( redactForLog( finalPayload ) )}` );
+                        }
+                    } else {
+                        finalPayload = this.attachUsageIfMissing( endpoint, upstreamBody, finalPayload );
+                    }
                     const transformMs = Date.now() - upstreamResponseReceivedAt;
                     const totalMs = Date.now() - requestStartedAt;
                     const serverTiming = formatTimingEntries( {
@@ -415,7 +444,7 @@ export class OpenAIProxy {
                     }
                     console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
                     this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                    return c.json( this.attachWebSearchMetadata( endpoint, enrichedPayload, webSearchContext.searchResponse ), response.status as any );
+                    return c.json( this.attachWebSearchMetadata( originalResponsesBody ? 'responses' : endpoint, finalPayload, webSearchContext.searchResponse ), response.status as any );
                 } catch ( error: any ) {
                     this.providerStats.recordFailure( config.id, selectedModel );
                     lastFailure = {
@@ -1198,6 +1227,10 @@ export class OpenAIProxy {
             return this.stripReasoningFields( body );
         }
 
+        if ( body?.stream === true && !this.hasExplicitReasoningRequest( body ) ) {
+            return body;
+        }
+
         const effort = this.resolveReasoningEffort( body, config, selectedModel );
         if ( !effort || effort === 'none' ) {
             return body;
@@ -1207,6 +1240,14 @@ export class OpenAIProxy {
             ...body,
             reasoning_effort: effort,
         };
+    }
+
+    private hasExplicitReasoningRequest( body: any ): boolean {
+        return typeof body?.reasoning_effort === 'string'
+            || typeof body?.reasoning?.effort === 'string'
+            || typeof body?.thinking?.effort === 'string'
+            || body?.include_reasoning === true
+            || body?.output_reasoning === true;
     }
 
     private resolveReasoningEffort( body: any, config: OpenAIModelConfig, selectedModel: string ): ReasoningEffort | undefined {
@@ -1290,6 +1331,113 @@ export class OpenAIProxy {
             return c.json( payload, status as any );
         }
         return c.text( String( payload ?? 'Upstream request failed' ), status as any );
+    }
+
+    private async streamResponsesConverted(
+        c: Context,
+        response: Response,
+        originalResponsesBody: any,
+        providerId: string,
+        selectedModel: string,
+        requestStartedAt: number,
+    ): Promise<Response> {
+        const endpoint = 'responses';
+        return stream( c, async ( streamWriter ) => {
+            const reader = response.body!.getReader();
+            const decoder = new TextDecoder();
+            const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
+            let firstChunkLogged = false;
+            let clientDisconnected = false;
+            let sseBuffer = '';
+
+            const clientSignal = c.req.raw.signal;
+            const onClientAbort = () => {
+                clientDisconnected = true;
+                reader.cancel( 'client disconnected' ).catch( () => {} );
+            };
+            clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+
+            try {
+                while ( !clientDisconnected ) {
+                    const { done, value } = await reader.read();
+                    if ( done ) break;
+                    if ( value && !firstChunkLogged ) {
+                        firstChunkLogged = true;
+                        console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
+                    }
+                    if ( value ) {
+                        sseBuffer += decoder.decode( value, { stream: true } );
+                    }
+
+                    const out: string[] = [];
+                    const parts = sseBuffer.split( '\n\n' );
+                    sseBuffer = parts.pop() ?? '';
+
+                    for ( const block of parts ) {
+                        const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
+                        if ( !dataLine ) continue;
+
+                        const data = dataLine.slice( 5 ).trimStart();
+                        if ( !data || data === '[DONE]' ) {
+                            processChatStreamChunkForResponses( null, responsesState, out );
+                        } else {
+                            try {
+                                const chunk = JSON.parse( data );
+                                processChatStreamChunkForResponses( chunk, responsesState, out );
+                            } catch { /* ignore malformed chunks */ }
+                        }
+                    }
+
+                    if ( out.length ) {
+                        await streamWriter.write( out.join( '' ) );
+                    }
+
+                    if ( responsesState.finished ) break;
+                }
+
+                // Flush remaining buffer
+                if ( sseBuffer.trim() && !clientDisconnected ) {
+                    const out: string[] = [];
+                    const dataLine = sseBuffer.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
+                    if ( dataLine ) {
+                        const data = dataLine.slice( 5 ).trimStart();
+                        if ( !data || data === '[DONE]' ) {
+                            processChatStreamChunkForResponses( null, responsesState, out );
+                        } else {
+                            try {
+                                const chunk = JSON.parse( data );
+                                processChatStreamChunkForResponses( chunk, responsesState, out );
+                            } catch { /* ignore */ }
+                        }
+                    }
+                    if ( out.length ) {
+                        await streamWriter.write( out.join( '' ) );
+                    }
+                }
+
+                // Ensure stream is finished
+                if ( !responsesState.finished ) {
+                    const out: string[] = [];
+                    processChatStreamChunkForResponses( null, responsesState, out );
+                    if ( out.length ) {
+                        await streamWriter.write( out.join( '' ) );
+                    }
+                }
+
+                if ( !clientDisconnected ) {
+                    console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+                }
+            } finally {
+                clientSignal.removeEventListener( 'abort', onClientAbort );
+                try { reader.releaseLock(); } catch { /* ignore */ }
+            }
+        }, async ( err, streamWriter ) => {
+            console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
+            await streamWriter.write( `event: error\ndata: ${JSON.stringify( {
+                type: 'error',
+                error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
+            } )}\n\n` );
+        } );
     }
 
     private buildApiUrl( config: OpenAIModelConfig, endpoint: string ): string {

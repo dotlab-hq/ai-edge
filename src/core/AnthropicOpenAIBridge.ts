@@ -237,12 +237,16 @@ function consumeSseBlocks( buffer: string ): { events: string[]; remainder: stri
 }
 
 function processSseBlockSync( block: string, state: StreamState, out: SseOut ): boolean {
-    const dataLines = block
+    const lines = block
         .split( '\n' )
-        .map( ( line ) => line.trim() )
-        .filter( ( line ) => line.startsWith( 'data:' ) );
+        .map( ( line ) => line.trim() );
+
+    const dataLines = lines.filter( ( line ) => line.startsWith( 'data:' ) );
 
     if ( !dataLines.length ) {
+        if ( lines.some( ( line ) => line.startsWith( ':' ) ) ) {
+            sendPingEventSync( state, out );
+        }
         return false;
     }
 
@@ -648,6 +652,10 @@ function sendErrorEventSync( out: SseOut, error: Error ): void {
     sendSseEventSync( undefined, out, {
         type: 'message_stop',
     } );
+}
+
+function sendPingEventSync( state: StreamState | undefined, out: SseOut ): void {
+    sendSseEventSync( state, out, { type: 'ping' } );
 }
 
 function sendSseEventSync( state: StreamState | undefined, out: SseOut, data: Record<string, any> ): void {
