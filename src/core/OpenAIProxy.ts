@@ -1357,6 +1357,18 @@ export class OpenAIProxy {
             };
             clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
+            const ensureCompleted = async () => {
+                if ( !responsesState.finished ) {
+                    const out: string[] = [];
+                    processChatStreamChunkForResponses( null, responsesState, out );
+                    if ( out.length ) {
+                        await streamWriter.write( out.join( '' ) );
+                    }
+                }
+                // Allow time for the HTTP layer to flush the final event before closing
+                await new Promise( ( resolve ) => setTimeout( resolve, 50 ) );
+            };
+
             try {
                 while ( !clientDisconnected ) {
                     const { done, value } = await reader.read();
@@ -1395,7 +1407,7 @@ export class OpenAIProxy {
                     if ( responsesState.finished ) break;
                 }
 
-                // Flush remaining buffer
+                // Flush remaining buffer — upstream may close without [DONE] or finish_reason
                 if ( sseBuffer.trim() && !clientDisconnected ) {
                     const out: string[] = [];
                     const dataLine = sseBuffer.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
@@ -1415,14 +1427,8 @@ export class OpenAIProxy {
                     }
                 }
 
-                // Ensure stream is finished
-                if ( !responsesState.finished ) {
-                    const out: string[] = [];
-                    processChatStreamChunkForResponses( null, responsesState, out );
-                    if ( out.length ) {
-                        await streamWriter.write( out.join( '' ) );
-                    }
-                }
+                // Final guarantee: always emit response.completed before closing
+                await ensureCompleted();
 
                 if ( !clientDisconnected ) {
                     console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
@@ -1433,6 +1439,12 @@ export class OpenAIProxy {
             }
         }, async ( err, streamWriter ) => {
             console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
+            // Always emit response.completed first so the client sees a valid terminal event
+            const out: string[] = [];
+            processChatStreamChunkForResponses( null, createResponsesStreamState( originalResponsesBody, Date.now() ), out );
+            if ( out.length ) {
+                await streamWriter.write( out.join( '' ) );
+            }
             await streamWriter.write( `event: error\ndata: ${JSON.stringify( {
                 type: 'error',
                 error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
