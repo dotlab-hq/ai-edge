@@ -352,6 +352,12 @@ export class OpenAIProxy {
                                 const decoder = new TextDecoder();
                                 let firstChunkLogged = false;
                                 let clientDisconnected = false;
+                                let heartbeatCleared = false;
+                                const heartbeatInterval = setInterval( () => {
+                                    if ( !clientDisconnected && !heartbeatCleared ) {
+                                        streamWriter.write( ': keepalive\n\n' ).catch( () => {} );
+                                    }
+                                }, 3000 );
 
                                 const clientSignal = c.req.raw.signal;
                                 const onClientAbort = () => {
@@ -366,6 +372,8 @@ export class OpenAIProxy {
                                         if ( done ) break;
                                         if ( value && !firstChunkLogged ) {
                                             firstChunkLogged = true;
+                                            clearInterval( heartbeatInterval );
+                                            heartbeatCleared = true;
                                             console.info( `[${endpoint}] stream_first_chunk provider=${config.id} model=${selectedModel} firstByteMs=${Date.now() - upstreamResponseReceivedAt}` );
                                         }
                                         if ( value ) {
@@ -387,6 +395,7 @@ export class OpenAIProxy {
                                         console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
                                     }
                                 } finally {
+                                    clearInterval( heartbeatInterval );
                                     clientSignal.removeEventListener( 'abort', onClientAbort );
                                     try { reader.releaseLock(); } catch { /* ignore */ }
                                 }
@@ -1386,12 +1395,22 @@ export class OpenAIProxy {
             if ( out.length ) writeSSE( out.join( '' ) );
         };
 
+        writeSSE( ': keepalive\n\n' );
+        let heartbeatCleared = false;
+        const heartbeatInterval = setInterval( () => {
+            if ( !clientDisconnected && !heartbeatCleared ) {
+                writeSSE( ': keepalive\n\n' );
+            }
+        }, 3000 );
+
         try {
             while ( !clientDisconnected ) {
                 const { done, value } = await reader.read();
                 if ( done ) break;
                 if ( value && !firstChunkLogged ) {
                     firstChunkLogged = true;
+                    clearInterval( heartbeatInterval );
+                    heartbeatCleared = true;
                     console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
                 }
                 if ( value ) {
@@ -1461,6 +1480,7 @@ export class OpenAIProxy {
             } )}\n\n` );
             if ( !outgoing.writableEnded ) outgoing.end();
         } finally {
+            clearInterval( heartbeatInterval );
             clientSignal.removeEventListener( 'abort', onClientAbort );
             try { reader.releaseLock(); } catch { /* ignore */ }
         }

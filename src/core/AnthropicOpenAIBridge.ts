@@ -96,6 +96,12 @@ export async function streamOpenAIResponseAsAnthropic(
         let bufferLength = 0;
         let firstUpstreamChunkLogged = false;
         let clientDisconnected = false;
+        let heartbeatStarted = false;
+        const heartbeatInterval = setInterval( () => {
+            if ( !clientDisconnected && !heartbeatStarted ) {
+                streamWriter.write( ': heartbeat\n\n' ).catch( () => {} );
+            }
+        }, 3000 );
 
         const clientSignal = c.req.raw.signal;
         const onClientAbort = () => {
@@ -118,6 +124,8 @@ export async function streamOpenAIResponseAsAnthropic(
                     const decoded = decoder.decode( value, { stream: true } );
                     if ( !firstUpstreamChunkLogged ) {
                         firstUpstreamChunkLogged = true;
+                        clearInterval( heartbeatInterval );
+                        heartbeatStarted = true;
                         console.info( `[anthropic-bridge] first_upstream_chunk model=${originalModel} firstByteMs=${Date.now() - requestStartedAt}` );
                     }
 
@@ -180,6 +188,7 @@ export async function streamOpenAIResponseAsAnthropic(
                 /* ignore secondary error */
             }
         } finally {
+            clearInterval( heartbeatInterval );
             clientSignal.removeEventListener( 'abort', onClientAbort );
             if ( !clientDisconnected ) {
                 console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
@@ -194,6 +203,117 @@ async function flushOut( out: SseOut, streamWriter: StreamWriter ): Promise<void
     const payload = out.join( '' );
     out.length = 0;
     await streamWriter.write( payload );
+}
+
+export async function relayUpstreamToStreamWriter(
+    c: Context,
+    response: Response,
+    originalModel: string,
+    streamWriter: StreamWriter,
+    initialContentBlocks: Array<Record<string, any>> = [],
+    requestStartedAt: number = Date.now()
+): Promise<void> {
+    const reader = response.body?.getReader();
+    if ( !reader ) {
+        const out: SseOut = [];
+        sendErrorEventSync( out, new Error( 'Upstream response did not include a stream' ) );
+        await streamWriter.write( out.join( '' ) );
+        return;
+    }
+
+    const decoder = new TextDecoder();
+    const state = createStreamState( originalModel, initialContentBlocks, requestStartedAt );
+    const bufferChunks: string[] = [];
+    let bufferLength = 0;
+    let firstUpstreamChunkLogged = false;
+    let clientDisconnected = false;
+
+    const clientSignal = c.req.raw.signal;
+    const onClientAbort = () => {
+        clientDisconnected = true;
+        reader.cancel( 'client disconnected' ).catch( () => {} );
+    };
+    clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+
+    try {
+        while ( !clientDisconnected ) {
+            const { done, value } = await reader.read();
+            if ( done ) {
+                break;
+            }
+
+            if ( value ) {
+                const decoded = decoder.decode( value, { stream: true } );
+                if ( !firstUpstreamChunkLogged ) {
+                    firstUpstreamChunkLogged = true;
+                    console.info( `[anthropic-bridge] first_upstream_chunk model=${originalModel} firstByteMs=${Date.now() - requestStartedAt}` );
+                }
+
+                bufferChunks.push( decoded );
+                bufferLength += decoded.length;
+            }
+
+            const joined = bufferChunks.length === 1 ? bufferChunks[0]! : bufferChunks.join( '' );
+            const { events, remainder } = consumeSseBlocks( joined );
+            bufferChunks.length = 0;
+            if ( remainder ) {
+                bufferChunks.push( remainder );
+            }
+            bufferLength = remainder.length;
+
+            const out: SseOut = [];
+            for ( const eventBlock of events ) {
+                const finished = processSseBlockSync( eventBlock, state, out );
+                if ( finished ) {
+                    await flushOut( out, streamWriter );
+                    console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
+                    reader.releaseLock();
+                    return;
+                }
+            }
+            if ( out.length ) {
+                await flushOut( out, streamWriter );
+            }
+        }
+
+        const tail = decoder.decode();
+        if ( tail ) {
+            bufferChunks.push( tail );
+        }
+        const joined = bufferChunks.length > 0 ? bufferChunks.join( '' ) : '';
+        const { events } = consumeSseBlocks( joined );
+        const out: SseOut = [];
+        for ( const eventBlock of events ) {
+            const finished = processSseBlockSync( eventBlock, state, out );
+            if ( finished ) {
+                await flushOut( out, streamWriter );
+                console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
+                reader.releaseLock();
+                return;
+            }
+        }
+
+        if ( !state.finished ) {
+            finishStreamSync( state, out );
+        }
+        if ( out.length ) {
+            await flushOut( out, streamWriter );
+        }
+    } catch ( error: any ) {
+        const errOut: SseOut = [];
+        sendErrorEventSync( errOut, error instanceof Error ? error : new Error( String( error ) ) );
+        try {
+            await flushOut( errOut, streamWriter );
+        } catch {
+            /* ignore secondary error */
+        }
+    } finally {
+        clientSignal.removeEventListener( 'abort', onClientAbort );
+        if ( !clientDisconnected ) {
+            console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
+        }
+        try { reader.releaseLock(); } catch { /* ignore */ }
+    }
 }
 
 function createStreamState( originalModel: string, initialContentBlocks: Array<Record<string, any>> = [], requestStartedAt: number = Date.now() ): StreamState {
