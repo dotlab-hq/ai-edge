@@ -456,9 +456,6 @@ export interface ResponsesStreamState {
     finished: boolean;
     requestStartedAt: number;
     firstEmissionLogged: boolean;
-    accumulatedText: string;
-    currentMessageId: string | null;
-    outputItems: Array<Record<string, unknown>>;
 }
 
 export function createResponsesStreamState( request: ResponsesRequest, requestStartedAt: number ): ResponsesStreamState {
@@ -477,9 +474,6 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         finished: false,
         requestStartedAt,
         firstEmissionLogged: false,
-        accumulatedText: '',
-        currentMessageId: null,
-        outputItems: [],
     };
 }
 
@@ -542,23 +536,21 @@ export function processChatStreamChunkForResponses(
     }
 
     const delta = choice.delta as Record<string, unknown> | undefined;
+    if ( !delta ) return false;
 
-    const content = delta?.content as string | undefined;
+    const content = delta.content as string | undefined;
     const finishReason = choice.finish_reason as string | undefined;
 
     // Handle text content
     if ( typeof content === 'string' && content.length > 0 ) {
         if ( !state.currentTextBlockOpen ) {
-            // Add output item — capture message id for later reuse
-            const msgId = generateId( 'msg' );
-            state.currentMessageId = msgId;
-            state.accumulatedText = '';
+            // Add output item
             emitResponsesEvent( out, 'response.output_item.added', {
                 type: 'response.output_item.added',
                 output_index: state.currentOutputIndex,
                 item: {
                     type: 'message',
-                    id: msgId,
+                    id: generateId( 'msg' ),
                     role: 'assistant',
                     status: 'in_progress',
                     content: [],
@@ -577,8 +569,6 @@ export function processChatStreamChunkForResponses(
             state.currentTextBlockOpen = true;
         }
 
-        state.accumulatedText += content;
-
         emitResponsesEvent( out, 'response.output_text.delta', {
             type: 'response.output_text.delta',
             output_index: state.currentOutputIndex,
@@ -591,46 +581,28 @@ export function processChatStreamChunkForResponses(
     if ( finishReason && finishReason !== 'null' ) {
         // Close text block if open
         if ( state.currentTextBlockOpen ) {
-            const fullText = state.accumulatedText;
-            const msgId = state.currentMessageId ?? generateId( 'msg' );
-            const completedOutputItem: Record<string, unknown> = {
-                type: 'message',
-                id: msgId,
-                role: 'assistant',
-                status: 'completed',
-                content: [ {
-                    type: 'output_text',
-                    text: fullText,
-                    annotations: [],
-                } ],
-            };
-
-            emitResponsesEvent( out, 'response.output_text.done', {
-                type: 'response.output_text.done',
-                output_index: state.currentOutputIndex,
-                content_index: state.contentBlockIndex,
-                text: fullText,
-            } );
             emitResponsesEvent( out, 'response.content_part.done', {
                 type: 'response.content_part.done',
                 output_index: state.currentOutputIndex,
                 content_index: state.contentBlockIndex,
                 part: {
                     type: 'output_text',
-                    text: fullText,
+                    text: '',
                 },
             } );
             emitResponsesEvent( out, 'response.output_item.done', {
                 type: 'response.output_item.done',
                 output_index: state.currentOutputIndex,
-                item: completedOutputItem,
+                item: {
+                    type: 'message',
+                    role: 'assistant',
+                    status: 'completed',
+                    content: [],
+                },
             } );
-            state.outputItems.push( completedOutputItem );
             state.currentOutputIndex++;
             state.contentBlockIndex = 0;
             state.currentTextBlockOpen = false;
-            state.accumulatedText = '';
-            state.currentMessageId = null;
         }
 
         finishResponsesStream( state, out );
@@ -646,41 +618,17 @@ function finishResponsesStream( state: ResponsesStreamState, out: string[] ): vo
 
     // Close any lingering text block
     if ( state.currentTextBlockOpen ) {
-        const fullText = state.accumulatedText;
-        const msgId = state.currentMessageId ?? generateId( 'msg' );
-        const completedOutputItem: Record<string, unknown> = {
-            type: 'message',
-            id: msgId,
-            role: 'assistant',
-            status: 'completed',
-            content: [ {
-                type: 'output_text',
-                text: fullText,
-                annotations: [],
-            } ],
-        };
-
-        emitResponsesEvent( out, 'response.output_text.done', {
-            type: 'response.output_text.done',
-            output_index: state.currentOutputIndex,
-            content_index: state.contentBlockIndex,
-            text: fullText,
-        } );
         emitResponsesEvent( out, 'response.content_part.done', {
             type: 'response.content_part.done',
             output_index: state.currentOutputIndex,
             content_index: state.contentBlockIndex,
-            part: { type: 'output_text', text: fullText },
+            part: { type: 'output_text', text: '' },
         } );
         emitResponsesEvent( out, 'response.output_item.done', {
             type: 'response.output_item.done',
             output_index: state.currentOutputIndex,
-            item: completedOutputItem,
+            item: { type: 'message', role: 'assistant', status: 'completed', content: [] },
         } );
-        state.outputItems.push( completedOutputItem );
-        state.currentTextBlockOpen = false;
-        state.accumulatedText = '';
-        state.currentMessageId = null;
     }
 
     emitResponsesEvent( out, 'response.completed', {
@@ -690,7 +638,7 @@ function finishResponsesStream( state: ResponsesStreamState, out: string[] ): vo
         status: 'completed',
         created: state.created,
         model: state.model,
-        output: state.outputItems,
+        output: [],
         usage: {
             input_tokens: state.inputTokens,
             input_tokens_details: { cached_tokens: state.cachedInputTokens },
