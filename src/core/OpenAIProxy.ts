@@ -1378,45 +1378,76 @@ export class OpenAIProxy {
         requestStartedAt: number,
     ): Promise<Response> {
         const endpoint = 'responses';
-        const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
-        const finalizeResponsesStream = async ( streamWriter: { write: ( chunk: string ) => Promise<unknown> } ) => {
-            if ( !responsesState.finished ) {
-                const out: string[] = [];
-                processChatStreamChunkForResponses( null, responsesState, out );
-                if ( out.length ) {
-                    await streamWriter.write( out.join( '' ) );
-                }
-            }
-            // Allow time for the HTTP layer to flush the final event before closing
-            await new Promise( ( resolve ) => setTimeout( resolve, 50 ) );
-        };
         return stream( c, async ( streamWriter ) => {
             const reader = response.body!.getReader();
             const decoder = new TextDecoder();
+            const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
             let firstChunkLogged = false;
             let clientDisconnected = false;
             let sseBuffer = '';
-            const heartbeat = startStreamHeartbeat(
-                ( chunk ) => streamWriter.write( chunk ),
-                { isClientConnected: () => !clientDisconnected }
-            );
 
-            const clientSignal = c.req.raw.signal;
-            const onClientAbort = () => {
-                clientDisconnected = true;
-                reader.cancel( 'client disconnected' ).catch( () => { } );
-            };
-            clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+        const clientSignal = c.req.raw.signal;
+        const onClientAbort = () => {
+            clientDisconnected = true;
+            reader.cancel( 'client disconnected' ).catch( () => {} );
+        };
+        clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
-            const processSseBuffer = (): string[] => {
+        const writeSSE = ( data: string ) => {
+            if ( clientDisconnected || outgoing.destroyed || outgoing.writableEnded ) return false;
+            try {
+                return outgoing.write( data );
+            } catch { return false; }
+        };
+
+        const emitCompleted = () => {
+            if ( responsesState.finished || clientDisconnected ) return;
+            const out: string[] = [];
+            processChatStreamChunkForResponses( null, responsesState, out );
+            if ( out.length ) writeSSE( out.join( '' ) );
+        };
+
+        try {
+            while ( !clientDisconnected ) {
+                const { done, value } = await reader.read();
+                if ( done ) break;
+                if ( value && !firstChunkLogged ) {
+                    firstChunkLogged = true;
+                    console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
+                }
+                if ( value ) {
+                    sseBuffer += decoder.decode( value, { stream: true } );
+                }
+
                 const out: string[] = [];
                 const parts = sseBuffer.split( '\n\n' );
                 sseBuffer = parts.pop() ?? '';
 
-                for ( const block of parts ) {
-                    const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
-                    if ( !dataLine ) continue;
+                    for ( const block of parts ) {
+                        const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
+                        if ( !dataLine ) continue;
 
+                        const data = dataLine.slice( 5 ).trimStart();
+                        if ( !data || data === '[DONE]' ) {
+                            processChatStreamChunkForResponses( null, responsesState, out );
+                        } else {
+                            try {
+                                const chunk = JSON.parse( data );
+                                processChatStreamChunkForResponses( chunk, responsesState, out );
+                            } catch { /* ignore malformed chunks */ }
+                        }
+                    }
+
+                if ( out.length ) writeSSE( out.join( '' ) );
+
+                    if ( responsesState.finished ) break;
+                }
+
+            // Flush remaining buffer
+            if ( sseBuffer.trim() && !clientDisconnected ) {
+                const out: string[] = [];
+                const dataLine = sseBuffer.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
+                if ( dataLine ) {
                     const data = dataLine.slice( 5 ).trimStart();
                     if ( !data || data === '[DONE]' ) {
                         processChatStreamChunkForResponses( null, responsesState, out );
@@ -1424,63 +1455,28 @@ export class OpenAIProxy {
                         try {
                             const chunk = JSON.parse( data );
                             processChatStreamChunkForResponses( chunk, responsesState, out );
-                        } catch { /* ignore malformed chunks */ }
+                        } catch { /* ignore */ }
                     }
                 }
-
-                return out;
-            };
-
-            try {
-                const initialOut: string[] = [': stream-start\n\n'];
-                emitResponsesStreamPreamble( responsesState, initialOut );
-                await streamWriter.write( initialOut.join( '' ) );
-                heartbeat.kick();
-
-                while ( !clientDisconnected ) {
-                    const { done, value } = await reader.read();
-                    if ( done ) break;
-                    if ( value && !firstChunkLogged ) {
-                        firstChunkLogged = true;
-                        console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
-                    }
-                    if ( value ) {
-                        sseBuffer += decoder.decode( value, { stream: true } );
-                    }
-
-                    const out = processSseBuffer();
-                    if ( out.length ) {
-                        await streamWriter.write( out.join( '' ) );
-                        heartbeat.kick();
-                    }
-
-                    if ( responsesState.finished ) break;
-                }
-
-                // Flush remaining buffer — upstream may close without [DONE] or finish_reason
-                if ( sseBuffer.trim() && !clientDisconnected ) {
-                    const out = processSseBuffer();
-                    if ( out.length ) {
-                        await streamWriter.write( out.join( '' ) );
-                    }
-                }
-
-                // Final guarantee: always emit response.completed before closing
-                await finalizeResponsesStream( streamWriter );
-
-                if ( !clientDisconnected ) {
-                    console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
-                }
-            } finally {
-                heartbeat.stop();
-                clientSignal.removeEventListener( 'abort', onClientAbort );
-                try { reader.releaseLock(); } catch { /* ignore */ }
+                if ( out.length ) writeSSE( out.join( '' ) );
             }
-        }, async ( err, streamWriter ) => {
+
+            // Safety net: emit response.completed if upstream closed without [DONE]/finish_reason
+            emitCompleted();
+
+            // Small delay to ensure TCP pushes the last chunk
+            if ( !clientDisconnected ) {
+                await new Promise( ( r ) => setTimeout( r, 50 ) );
+            }
+
+            if ( !clientDisconnected ) {
+                outgoing.end();
+                console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+            }
+        } catch ( err: any ) {
             console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
-            // Always emit response.completed first so the client sees a valid terminal event
-            await finalizeResponsesStream( streamWriter );
-            await streamWriter.write( `event: error\ndata: ${JSON.stringify( {
+            emitCompleted();
+            writeSSE( `event: error\ndata: ${JSON.stringify( {
                 type: 'error',
                 error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
             } )}\n\n` );
