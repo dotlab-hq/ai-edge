@@ -9,7 +9,7 @@ export interface StreamHeartbeat {
     stop: () => void;
 }
 
-const DEFAULT_INTERVAL_MS = 3000;
+const DEFAULT_INTERVAL_MS = 100;
 const DEFAULT_COMMENT = ': keepalive\n\n';
 
 export function startStreamHeartbeat(
@@ -28,12 +28,17 @@ export function startStreamHeartbeat(
         try {
             const result = write( comment );
             if ( result && typeof ( result as Promise<unknown> ).catch === 'function' ) {
-                ( result as Promise<unknown> ).catch( () => {} );
+                ( result as Promise<unknown> ).catch( () => { } );
             }
         } catch {
             // ignore — heartbeat is best-effort
         }
     };
+
+    // Send an immediate heartbeat on creation so slow-starting streams
+    // (e.g. waiting for upstream response) don't cause client timeouts.
+    safeWrite();
+    lastActivityAt = Date.now();
 
     const interval = setInterval( () => {
         if ( !active ) return;

@@ -1449,6 +1449,15 @@ export class OpenAIProxy {
                             } )}\n\n`,
                         ].join( '' ) ) );
                     } finally {
+                        // Guarantee response.completed before closing the stream,
+                        // even if the try block errored or the safety net didn't fire.
+                        if ( !responsesState.finished ) {
+                            try {
+                                const out: string[] = [];
+                                processChatStreamChunkForResponses( null, responsesState, out );
+                                if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
+                            } catch { /* stream may already be errored */ }
+                        }
                         heartbeat?.stop();
                         clientSignal.removeEventListener( 'abort', onClientAbort );
                         try { upstreamReader.releaseLock(); } catch { /* ignore */ }

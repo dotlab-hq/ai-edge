@@ -540,48 +540,51 @@ export function processChatStreamChunkForResponses(
     }
 
     const delta = choice.delta as Record<string, unknown> | undefined;
-    if ( !delta ) return false;
-
-    const content = delta.content as string | undefined;
     const finishReason = choice.finish_reason as string | undefined;
 
     // Handle text content
-    if ( typeof content === 'string' && content.length > 0 ) {
-        if ( !state.currentTextBlockOpen ) {
-            // Add output item
-            emitResponsesEvent( out, 'response.output_item.added', {
-                type: 'response.output_item.added',
-                output_index: state.currentOutputIndex,
-                item: {
-                    type: 'message',
-                    id: generateId( 'msg' ),
-                    role: 'assistant',
-                    status: 'in_progress',
-                    content: [],
-                },
-            } );
-            // Start content block
-            emitResponsesEvent( out, 'response.content_part.added', {
-                type: 'response.content_part.added',
+    if ( delta ) {
+        const content = delta.content as string | undefined;
+
+        if ( typeof content === 'string' && content.length > 0 ) {
+            if ( !state.currentTextBlockOpen ) {
+                // Add output item
+                emitResponsesEvent( out, 'response.output_item.added', {
+                    type: 'response.output_item.added',
+                    output_index: state.currentOutputIndex,
+                    item: {
+                        type: 'message',
+                        id: generateId( 'msg' ),
+                        role: 'assistant',
+                        status: 'in_progress',
+                        content: [],
+                    },
+                } );
+                // Start content block
+                emitResponsesEvent( out, 'response.content_part.added', {
+                    type: 'response.content_part.added',
+                    output_index: state.currentOutputIndex,
+                    content_index: state.contentBlockIndex,
+                    part: {
+                        type: 'output_text',
+                        text: '',
+                    },
+                } );
+                state.currentTextBlockOpen = true;
+            }
+
+            emitResponsesEvent( out, 'response.output_text.delta', {
+                type: 'response.output_text.delta',
                 output_index: state.currentOutputIndex,
                 content_index: state.contentBlockIndex,
-                part: {
-                    type: 'output_text',
-                    text: '',
-                },
+                delta: content,
             } );
-            state.currentTextBlockOpen = true;
         }
-
-        emitResponsesEvent( out, 'response.output_text.delta', {
-            type: 'response.output_text.delta',
-            output_index: state.currentOutputIndex,
-            content_index: state.contentBlockIndex,
-            delta: content,
-        } );
     }
 
-    // Handle finish_reason
+    // Handle finish_reason — check regardless of whether delta exists,
+    // because some providers send finish_reason in a separate chunk
+    // without any content delta.
     if ( finishReason && finishReason !== 'null' ) {
         // Close text block if open
         if ( state.currentTextBlockOpen ) {
