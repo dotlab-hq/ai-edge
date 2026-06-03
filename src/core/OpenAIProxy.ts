@@ -22,10 +22,12 @@ import {
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
+import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 import {
     convertResponsesRequestToChat,
     convertChatResponseToResponses,
     createResponsesStreamState,
+    emitResponsesStreamPreamble,
     processChatStreamChunkForResponses,
 } from './ResponsesConversion';
 
@@ -297,28 +299,14 @@ export class OpenAIProxy {
                         console.info( `[${endpoint}] upstream_request model=${selectedModel} body=${JSON.stringify( redactForLog( upstreamBody ) )}` );
                     }
 
-                    const response = await fetchWithProxy( url, {
+                    const responsePromise = fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
                         body: JSON.stringify( upstreamBody ),
-                    }, CONFIG.proxy, { skipTimeout: upstreamBody.stream === true } );
-                    upstreamResponseReceivedAt = Date.now();
-
-                    backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
-                    if ( response.status === 429 ) {
-                        this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                        continue;
-                    }
-
-                    if ( this.isRedirectStatus( response.status ) ) {
-                        const location = response.headers.get( 'location' );
-                        if ( location ) {
-                            const redirectModel = this.extractModelFromLocation( location );
-                            if ( redirectModel && redirectModel !== modelName ) {
-                                return this.proxyRequest( c, endpoint, redirectDepth + 1, { ...body, model: redirectModel } );
-                            }
-                        }
-                    }
+                    }, CONFIG.proxy, { skipTimeout: upstreamBody.stream === true } ).then( ( response ) => {
+                        upstreamResponseReceivedAt = Date.now();
+                        return response;
+                    } );
 
                     // Handle streaming responses
                     if ( upstreamBody.stream === true ) {
@@ -331,86 +319,125 @@ export class OpenAIProxy {
                             body_parse: bodyParsedAt - requestStartedAt,
                             web_search: webSearchCompletedAt - requestStartedAt,
                             rate_limit: rateLimitCompletedAt - requestStartedAt,
-                            upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
-                            total: upstreamResponseReceivedAt - requestStartedAt,
+                            total: Date.now() - requestStartedAt,
                         } );
                         if ( serverTiming ) {
                             c.header( 'Server-Timing', serverTiming );
                         }
+                        const streamResponse = await stream( c, async ( streamWriter ) => {
+                            let clientDisconnected = false;
+                            const heartbeat = startStreamHeartbeat(
+                                ( chunk ) => streamWriter.write( chunk ),
+                                { isClientConnected: () => !clientDisconnected }
+                            );
+                            let response: Response;
+                            try {
+                                await streamWriter.write( ': stream-start\n\n' );
+                                heartbeat.kick();
+                                response = await responsePromise;
+                            } catch ( error: any ) {
+                                heartbeat.stop();
+                                console.error( `[${endpoint}] Streaming upstream failed: ${error?.message || String( error )}` );
+                                await streamWriter.writeln( `data: ${JSON.stringify( {
+                                    error: {
+                                        message: error?.message || 'An error occurred during streaming',
+                                        type: 'upstream_error',
+                                    }
+                                } )}\n` );
+                                return;
+                            }
 
-                        if ( response.body ) {
+                            backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
+                            if ( response.status === 429 ) {
+                                heartbeat.stop();
+                                this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+                                await streamWriter.writeln( `data: ${JSON.stringify( {
+                                    error: {
+                                        message: `Upstream request failed with ${response.status}`,
+                                        type: 'upstream_error',
+                                    }
+                                } )}\n` );
+                                return;
+                            }
+
+                            if ( this.isRedirectStatus( response.status ) ) {
+                                heartbeat.stop();
+                                await streamWriter.writeln( `data: ${JSON.stringify( {
+                                    error: {
+                                        message: `Upstream redirected with ${response.status}`,
+                                        type: 'upstream_error',
+                                    }
+                                } )}\n` );
+                                return;
+                            }
+
+                            if ( !response.body ) {
+                                heartbeat.stop();
+                                await streamWriter.writeln( `data: ${JSON.stringify( {
+                                    error: {
+                                        message: 'Upstream response did not include a stream',
+                                        type: 'upstream_error',
+                                    }
+                                } )}\n` );
+                                return;
+                            }
+
                             console.info( `[${endpoint}] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
                             this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
 
                             // Responses API: convert chat SSE chunks to Responses SSE format
                             if ( originalResponsesBody ) {
-                                return this.streamResponsesConverted( c, response, originalResponsesBody, config.id, selectedModel, requestStartedAt );
+                                heartbeat.stop();
+                                await this.streamResponsesConverted( c, response, originalResponsesBody, config.id, selectedModel, requestStartedAt );
+                                return;
                             }
 
-                            return stream( c, async ( streamWriter ) => {
-                                const reader = response.body!.getReader();
-                                const decoder = new TextDecoder();
-                                let firstChunkLogged = false;
-                                let clientDisconnected = false;
-                                let heartbeatCleared = false;
-                                const heartbeatInterval = setInterval( () => {
-                                    if ( !clientDisconnected && !heartbeatCleared ) {
-                                        streamWriter.write( ': keepalive\n\n' ).catch( () => {} );
+                            const reader = response.body.getReader();
+                            const decoder = new TextDecoder();
+                            let firstChunkLogged = false;
+                            const clientSignal = c.req.raw.signal;
+                            const onClientAbort = () => {
+                                clientDisconnected = true;
+                                reader.cancel( 'client disconnected' ).catch( () => { } );
+                            };
+                            clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+
+                            try {
+                                while ( !clientDisconnected ) {
+                                    const { done, value } = await reader.read();
+                                    if ( done ) break;
+                                    if ( value && !firstChunkLogged ) {
+                                        firstChunkLogged = true;
+                                        console.info( `[${endpoint}] stream_first_chunk provider=${config.id} model=${selectedModel} firstByteMs=${Date.now() - upstreamResponseReceivedAt}` );
                                     }
-                                }, 3000 );
-
-                                const clientSignal = c.req.raw.signal;
-                                const onClientAbort = () => {
-                                    clientDisconnected = true;
-                                    reader.cancel( 'client disconnected' ).catch( () => {} );
-                                };
-                                clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
-
-                                try {
-                                    while ( !clientDisconnected ) {
-                                        const { done, value } = await reader.read();
-                                        if ( done ) break;
-                                        if ( value && !firstChunkLogged ) {
-                                            firstChunkLogged = true;
-                                            clearInterval( heartbeatInterval );
-                                            heartbeatCleared = true;
-                                            console.info( `[${endpoint}] stream_first_chunk provider=${config.id} model=${selectedModel} firstByteMs=${Date.now() - upstreamResponseReceivedAt}` );
-                                        }
-                                        if ( value ) {
-                                            const chunk = decoder.decode( value, { stream: true } );
-                                            if ( chunk ) {
-                                                await streamWriter.write( chunk );
-                                            }
+                                    if ( value ) {
+                                        const chunk = decoder.decode( value, { stream: true } );
+                                        if ( chunk ) {
+                                            await streamWriter.write( chunk );
+                                            heartbeat.kick();
                                         }
                                     }
-
-                                    if ( !clientDisconnected ) {
-                                        const tail = decoder.decode();
-                                        if ( tail ) {
-                                            await streamWriter.write( tail );
-                                        }
-                                    }
-
-                                    if ( !clientDisconnected ) {
-                                        console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
-                                    }
-                                } finally {
-                                    clearInterval( heartbeatInterval );
-                                    clientSignal.removeEventListener( 'abort', onClientAbort );
-                                    try { reader.releaseLock(); } catch { /* ignore */ }
                                 }
-                            }, async ( err, streamWriter ) => {
-                                console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
-                                await streamWriter.writeln( `data: ${JSON.stringify( {
-                                    error: {
-                                        message: err?.message || 'An error occurred during streaming',
-                                        type: 'upstream_error',
+
+                                if ( !clientDisconnected ) {
+                                    const tail = decoder.decode();
+                                    if ( tail ) {
+                                        await streamWriter.write( tail );
                                     }
-                                } )}\n` );
-                            } );
-                        }
+                                }
+
+                                if ( !clientDisconnected ) {
+                                    console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+                                }
+                            } finally {
+                                heartbeat.stop();
+                                clientSignal.removeEventListener( 'abort', onClientAbort );
+                                try { reader.releaseLock(); } catch { /* ignore */ }
+                            }
+                        } );
                     }
 
+                    const response = await responsePromise;
                     const payload = await this.parseResponsePayload( response );
                     if ( isDebugEnabled() ) {
                         console.info( `[${endpoint}] upstream_response model=${selectedModel} status=${response.status} body=${JSON.stringify( redactForLog( payload ) )}` );
@@ -1123,7 +1150,7 @@ export class OpenAIProxy {
         this.optimizedBackendCache.set( cacheKey, {
             backends: sorted,
             expiresAt: Date.now() + OpenAIProxy.BACKEND_CACHE_TTL_MS,
-        });
+        } );
 
         if ( this.optimizedBackendCache.size > OpenAIProxy.MAX_CACHE_SIZE ) {
             const firstKey = this.optimizedBackendCache.keys().next().value;
@@ -1167,7 +1194,7 @@ export class OpenAIProxy {
         if ( this.rrIndexByKey.size > OpenAIProxy.MAX_CACHE_SIZE ) {
             // Remove a random entry
             const keys = Array.from( this.rrIndexByKey.keys() );
-            const randomKey = keys[ Math.floor( Math.random() * keys.length ) ];
+            const randomKey = keys[Math.floor( Math.random() * keys.length )];
             this.rrIndexByKey.delete( randomKey! );
         }
 
@@ -1351,34 +1378,65 @@ export class OpenAIProxy {
         requestStartedAt: number,
     ): Promise<Response> {
         const endpoint = 'responses';
+        const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
+        const finalizeResponsesStream = async ( streamWriter: { write: ( chunk: string ) => Promise<unknown> } ) => {
+            if ( !responsesState.finished ) {
+                const out: string[] = [];
+                processChatStreamChunkForResponses( null, responsesState, out );
+                if ( out.length ) {
+                    await streamWriter.write( out.join( '' ) );
+                }
+            }
+            // Allow time for the HTTP layer to flush the final event before closing
+            await new Promise( ( resolve ) => setTimeout( resolve, 50 ) );
+        };
         return stream( c, async ( streamWriter ) => {
             const reader = response.body!.getReader();
             const decoder = new TextDecoder();
-            const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
             let firstChunkLogged = false;
             let clientDisconnected = false;
             let sseBuffer = '';
+            const heartbeat = startStreamHeartbeat(
+                ( chunk ) => streamWriter.write( chunk ),
+                { isClientConnected: () => !clientDisconnected }
+            );
 
             const clientSignal = c.req.raw.signal;
             const onClientAbort = () => {
                 clientDisconnected = true;
-                reader.cancel( 'client disconnected' ).catch( () => {} );
+                reader.cancel( 'client disconnected' ).catch( () => { } );
             };
             clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
-            const ensureCompleted = async () => {
-                if ( !responsesState.finished ) {
-                    const out: string[] = [];
-                    processChatStreamChunkForResponses( null, responsesState, out );
-                    if ( out.length ) {
-                        await streamWriter.write( out.join( '' ) );
+            const processSseBuffer = (): string[] => {
+                const out: string[] = [];
+                const parts = sseBuffer.split( '\n\n' );
+                sseBuffer = parts.pop() ?? '';
+
+                for ( const block of parts ) {
+                    const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
+                    if ( !dataLine ) continue;
+
+                    const data = dataLine.slice( 5 ).trimStart();
+                    if ( !data || data === '[DONE]' ) {
+                        processChatStreamChunkForResponses( null, responsesState, out );
+                    } else {
+                        try {
+                            const chunk = JSON.parse( data );
+                            processChatStreamChunkForResponses( chunk, responsesState, out );
+                        } catch { /* ignore malformed chunks */ }
                     }
                 }
-                // Allow time for the HTTP layer to flush the final event before closing
-                await new Promise( ( resolve ) => setTimeout( resolve, 50 ) );
+
+                return out;
             };
 
             try {
+                const initialOut: string[] = [': stream-start\n\n'];
+                emitResponsesStreamPreamble( responsesState, initialOut );
+                await streamWriter.write( initialOut.join( '' ) );
+                heartbeat.kick();
+
                 while ( !clientDisconnected ) {
                     const { done, value } = await reader.read();
                     if ( done ) break;
@@ -1390,112 +1448,43 @@ export class OpenAIProxy {
                         sseBuffer += decoder.decode( value, { stream: true } );
                     }
 
-                    const out: string[] = [];
-                    const parts = sseBuffer.split( '\n\n' );
-                    sseBuffer = parts.pop() ?? '';
-
-<<<<<<< HEAD
-        writeSSE( ': keepalive\n\n' );
-        let heartbeatCleared = false;
-        const heartbeatInterval = setInterval( () => {
-            if ( !clientDisconnected && !heartbeatCleared ) {
-                writeSSE( ': keepalive\n\n' );
-            }
-        }, 3000 );
-
-        try {
-            while ( !clientDisconnected ) {
-                const { done, value } = await reader.read();
-                if ( done ) break;
-                if ( value && !firstChunkLogged ) {
-                    firstChunkLogged = true;
-                    clearInterval( heartbeatInterval );
-                    heartbeatCleared = true;
-                    console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
-                }
-                if ( value ) {
-                    sseBuffer += decoder.decode( value, { stream: true } );
-=======
-                    for ( const block of parts ) {
-                        const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
-                        if ( !dataLine ) continue;
-
-                        const data = dataLine.slice( 5 ).trimStart();
-                        if ( !data || data === '[DONE]' ) {
-                            processChatStreamChunkForResponses( null, responsesState, out );
-                        } else {
-                            try {
-                                const chunk = JSON.parse( data );
-                                processChatStreamChunkForResponses( chunk, responsesState, out );
-                            } catch { /* ignore malformed chunks */ }
-                        }
-                    }
-
+                    const out = processSseBuffer();
                     if ( out.length ) {
                         await streamWriter.write( out.join( '' ) );
+                        heartbeat.kick();
                     }
 
                     if ( responsesState.finished ) break;
->>>>>>> parent of a179263 (responses compat)
                 }
 
                 // Flush remaining buffer — upstream may close without [DONE] or finish_reason
                 if ( sseBuffer.trim() && !clientDisconnected ) {
-                    const out: string[] = [];
-                    const dataLine = sseBuffer.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
-                    if ( dataLine ) {
-                        const data = dataLine.slice( 5 ).trimStart();
-                        if ( !data || data === '[DONE]' ) {
-                            processChatStreamChunkForResponses( null, responsesState, out );
-                        } else {
-                            try {
-                                const chunk = JSON.parse( data );
-                                processChatStreamChunkForResponses( chunk, responsesState, out );
-                            } catch { /* ignore */ }
-                        }
-                    }
+                    const out = processSseBuffer();
                     if ( out.length ) {
                         await streamWriter.write( out.join( '' ) );
                     }
                 }
 
                 // Final guarantee: always emit response.completed before closing
-                await ensureCompleted();
+                await finalizeResponsesStream( streamWriter );
 
                 if ( !clientDisconnected ) {
                     console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
                 }
             } finally {
+                heartbeat.stop();
                 clientSignal.removeEventListener( 'abort', onClientAbort );
                 try { reader.releaseLock(); } catch { /* ignore */ }
             }
         }, async ( err, streamWriter ) => {
             console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
             // Always emit response.completed first so the client sees a valid terminal event
-            const out: string[] = [];
-            processChatStreamChunkForResponses( null, createResponsesStreamState( originalResponsesBody, Date.now() ), out );
-            if ( out.length ) {
-                await streamWriter.write( out.join( '' ) );
-            }
+            await finalizeResponsesStream( streamWriter );
             await streamWriter.write( `event: error\ndata: ${JSON.stringify( {
                 type: 'error',
                 error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
             } )}\n\n` );
-<<<<<<< HEAD
-            if ( !outgoing.writableEnded ) outgoing.end();
-        } finally {
-            clearInterval( heartbeatInterval );
-            clientSignal.removeEventListener( 'abort', onClientAbort );
-            try { reader.releaseLock(); } catch { /* ignore */ }
-        }
-
-        // Return a dummy Response — the real response has been written directly
-        // to the raw socket above. Hono/node-server will not process this further
-        // because headers are already sent.
-        return new Response( null, { status: 200 } );
-=======
         } );
->>>>>>> parent of a179263 (responses compat)
     }
 
     private buildApiUrl( config: OpenAIModelConfig, endpoint: string ): string {

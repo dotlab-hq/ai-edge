@@ -1,6 +1,6 @@
 {
   "name": "ai-edge",
-  "version": "1.0.34",
+  "version": "1.0.36",
   "description": "Local LLM routing server with OpenAI compatibility",
   "type": "module",
   "bin": {

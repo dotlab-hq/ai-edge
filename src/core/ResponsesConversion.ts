@@ -129,9 +129,9 @@ export function convertResponsesRequestToChat( request: ResponsesRequest ): Chat
     if ( reasoningEffort ) chatRequest.reasoning_effort = reasoningEffort;
 
     // Carry through any extra fields not explicitly mapped
-    for ( const [ key, value ] of Object.entries( request ) ) {
+    for ( const [key, value] of Object.entries( request ) ) {
         if ( !( key in chatRequest ) && value !== undefined ) {
-            ( chatRequest as Record<string, unknown> )[ key ] = value;
+            ( chatRequest as Record<string, unknown> )[key] = value;
         }
     }
 
@@ -164,7 +164,7 @@ function buildMessagesFromResponsesInput( request: ResponsesRequest ): ChatMessa
 
 function normaliseInputItems( input: ResponsesRequest['input'] ): Array<Record<string, unknown>> {
     if ( input == null ) return [];
-    if ( typeof input === 'string' ) return [ { role: 'user', content: input } ];
+    if ( typeof input === 'string' ) return [{ role: 'user', content: input }];
     if ( Array.isArray( input ) ) return input;
     return [];
 }
@@ -177,14 +177,14 @@ function mapInputItemToMessage( item: Record<string, unknown> ): ChatMessage | C
         return {
             role: 'assistant',
             content: null,
-            tool_calls: [ {
+            tool_calls: [{
                 id: ( item.call_id as string ) || ( item.id as string ) || generateId( 'call' ),
                 type: 'function',
                 function: {
                     name: ( item.name as string ) || '',
                     arguments: ( item.arguments as string ) || '{}',
                 },
-            } ],
+            }],
         };
     }
 
@@ -320,7 +320,7 @@ function convertToolsToChat( tools?: Array<Record<string, unknown>> ): ChatTool[
 
 function convertToolChoiceToChat( toolChoice: unknown ): unknown {
     if ( !toolChoice || typeof toolChoice !== 'object' ) {
-        if ( typeof toolChoice === 'string' && [ 'auto', 'none', 'required' ].includes( toolChoice ) ) {
+        if ( typeof toolChoice === 'string' && ['auto', 'none', 'required'].includes( toolChoice ) ) {
             return toolChoice;
         }
         return undefined;
@@ -335,7 +335,7 @@ function convertToolChoiceToChat( toolChoice: unknown ): unknown {
         };
     }
 
-    if ( typeof tc.type === 'string' && [ 'auto', 'none', 'required' ].includes( tc.type ) ) {
+    if ( typeof tc.type === 'string' && ['auto', 'none', 'required'].includes( tc.type ) ) {
         return tc.type;
     }
 
@@ -366,7 +366,7 @@ export function convertChatResponseToResponses(
     chatResponse: ChatCompletionResponse,
     originalRequest: ResponsesRequest,
 ): Record<string, unknown> {
-    const choice = chatResponse.choices?.[ 0 ];
+    const choice = chatResponse.choices?.[0];
     const message = choice?.message;
 
     const output: ResponsesOutputItem[] = [];
@@ -393,11 +393,11 @@ export function convertChatResponseToResponses(
             id: generateId( 'msg' ),
             role: 'assistant',
             status: 'completed',
-            content: [ {
+            content: [{
                 type: 'output_text',
                 text: textContent,
                 annotations: [],
-            } ],
+            }],
         } );
     } else if ( !message?.tool_calls?.length ) {
         // Empty response — still emit a message item
@@ -477,6 +477,26 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
     };
 }
 
+export function emitResponsesStreamPreamble( state: ResponsesStreamState, out: string[] ): void {
+    if ( state.hasEmittedResponse ) return;
+
+    emitResponsesEvent( out, 'response.created', {
+        type: 'response',
+        id: state.responseId,
+        object: 'response',
+        status: 'in_progress',
+        created: state.created,
+        model: state.model,
+        output: [],
+    } );
+    emitResponsesEvent( out, 'response.in_progress', {
+        type: 'response',
+        id: state.responseId,
+        status: 'in_progress',
+    } );
+    state.hasEmittedResponse = true;
+}
+
 /**
  * Process one OpenAI chat completion SSE data chunk and emit corresponding
  * Responses-format SSE lines into `out`. Returns `true` when the stream is
@@ -506,26 +526,10 @@ export function processChatStreamChunkForResponses(
     }
 
     // Emit response.created on first chunk
-    if ( !state.hasEmittedResponse ) {
-        emitResponsesEvent( out, 'response.created', {
-            type: 'response',
-            id: state.responseId,
-            object: 'response',
-            status: 'in_progress',
-            created: state.created,
-            model: state.model,
-            output: [],
-        } );
-        emitResponsesEvent( out, 'response.in_progress', {
-            type: 'response',
-            id: state.responseId,
-            status: 'in_progress',
-        } );
-        state.hasEmittedResponse = true;
-    }
+    emitResponsesStreamPreamble( state, out );
 
     const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
-    const choice = choices?.[ 0 ];
+    const choice = choices?.[0];
     if ( !choice ) {
         // Usage-only final chunk with no choices — finish
         if ( usage ) {

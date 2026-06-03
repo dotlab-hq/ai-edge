@@ -15,6 +15,7 @@ import { codeInterpreterHandler } from './CodeInterpreterHandler';
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
+import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -181,14 +182,14 @@ export class AnthropicProxy {
       const onClientAbort = () => { clientDisconnected = true; };
       clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
-      const heartbeatInterval = setInterval( () => {
-        if ( !clientDisconnected ) {
-          streamWriter.write( ': keepalive\n\n' ).catch( () => {} );
-        }
-      }, 3000 );
+      const heartbeat = startStreamHeartbeat(
+        ( chunk ) => streamWriter.write( chunk ),
+        { isClientConnected: () => !clientDisconnected }
+      );
 
       try {
         await streamWriter.write( ': keepalive\n\n' );
+        heartbeat.kick();
 
         const backendIds = backends.map( b => b.id ).join( ', ' );
         console.error( `[${endpoint}] Attempting OpenAI backends for model ${requestedModel}: ${backendIds}` );
@@ -250,12 +251,12 @@ export class AnthropicProxy {
 
               const contentType = response.headers.get( 'content-type' ) ?? '';
               if ( openAIRequest.stream === true && response.ok && response.body && contentType.includes( 'text/event-stream' ) ) {
-                clearInterval( heartbeatInterval );
+                heartbeat.stop();
                 const serverTiming = formatTimingEntries( {
                   body_parse: bodyParsedAt - requestStartedAt,
                   web_search: webSearchCompletedAt - requestStartedAt,
                   upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
-                  total: upstreamResponseReceivedAt - requestStartedAt,
+                  total: upstreamResponseReceivedAt - upstreamRequestStartedAt,
                 } );
                 if ( serverTiming ) {
                   c.header( 'Server-Timing', serverTiming );
@@ -334,7 +335,7 @@ export class AnthropicProxy {
               }
               console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
               this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-              clearInterval( heartbeatInterval );
+              heartbeat.stop();
               const errorOut: string[] = [];
               const finalPayload = this.attachUsageIfMissing( endpoint, body, responseWithWebSearch );
               errorOut.push( `event: message\ndata: ${JSON.stringify( finalPayload )}\n\n` );
@@ -359,7 +360,7 @@ export class AnthropicProxy {
           }
         }
 
-        clearInterval( heartbeatInterval );
+        heartbeat.stop();
         if ( lastFailure ) {
           const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
           console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
@@ -378,7 +379,7 @@ export class AnthropicProxy {
         }
         clientSignal.removeEventListener( 'abort', onClientAbort );
       } catch ( err: any ) {
-        clearInterval( heartbeatInterval );
+        heartbeat.stop();
         clientSignal.removeEventListener( 'abort', onClientAbort );
         try {
           const errOut: string[] = [];
@@ -842,55 +843,55 @@ export class AnthropicProxy {
         return message;
       }
 
-        const toolCalls = message.tool_calls.map( ( toolCall: any ) => {
-          if ( !toolCall || typeof toolCall !== 'object' ) {
+      const toolCalls = message.tool_calls.map( ( toolCall: any ) => {
+        if ( !toolCall || typeof toolCall !== 'object' ) {
+          return toolCall;
+        }
+
+        // Gemini API expects thought_signature in extra_content.google.thought_signature
+        const existingSig = toolCall.extra_content?.google?.thought_signature
+          || toolCall.thought_signature
+          || toolCall.function?.thought_signature;
+
+        if ( existingSig ) {
+          if ( toolCall.extra_content?.google?.thought_signature && toolCall.function?.thought_signature ) {
             return toolCall;
           }
-
-          // Gemini API expects thought_signature in extra_content.google.thought_signature
-          const existingSig = toolCall.extra_content?.google?.thought_signature
-            || toolCall.thought_signature
-            || toolCall.function?.thought_signature;
-
-          if ( existingSig ) {
-            if ( toolCall.extra_content?.google?.thought_signature && toolCall.function?.thought_signature ) {
-              return toolCall;
-            }
-            changed = true;
-            return {
-              ...toolCall,
-              thought_signature: existingSig,
-              function: {
-                ...( toolCall.function || {} ),
-                thought_signature: existingSig,
-              },
-              extra_content: {
-                ...( toolCall.extra_content || {} ),
-                google: {
-                  ...( toolCall.extra_content?.google || {} ),
-                  thought_signature: existingSig,
-                },
-              },
-            };
-          }
-
           changed = true;
           return {
             ...toolCall,
-            thought_signature: FALLBACK_SIG,
+            thought_signature: existingSig,
             function: {
               ...( toolCall.function || {} ),
-              thought_signature: FALLBACK_SIG,
+              thought_signature: existingSig,
             },
             extra_content: {
               ...( toolCall.extra_content || {} ),
               google: {
                 ...( toolCall.extra_content?.google || {} ),
-                thought_signature: FALLBACK_SIG,
+                thought_signature: existingSig,
               },
             },
           };
-        } );
+        }
+
+        changed = true;
+        return {
+          ...toolCall,
+          thought_signature: FALLBACK_SIG,
+          function: {
+            ...( toolCall.function || {} ),
+            thought_signature: FALLBACK_SIG,
+          },
+          extra_content: {
+            ...( toolCall.extra_content || {} ),
+            google: {
+              ...( toolCall.extra_content?.google || {} ),
+              thought_signature: FALLBACK_SIG,
+            },
+          },
+        };
+      } );
 
       if ( toolCalls === message.tool_calls ) {
         return message;
