@@ -22,6 +22,7 @@ import {
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
+import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 import {
     convertResponsesRequestToChat,
     convertChatResponseToResponses,
@@ -352,6 +353,10 @@ export class OpenAIProxy {
                                 const decoder = new TextDecoder();
                                 let firstChunkLogged = false;
                                 let clientDisconnected = false;
+                                const heartbeat = startStreamHeartbeat(
+                                    ( chunk ) => streamWriter.write( chunk ),
+                                    { isClientConnected: () => !clientDisconnected }
+                                );
 
                                 const clientSignal = c.req.raw.signal;
                                 const onClientAbort = () => {
@@ -372,6 +377,7 @@ export class OpenAIProxy {
                                             const chunk = decoder.decode( value, { stream: true } );
                                             if ( chunk ) {
                                                 await streamWriter.write( chunk );
+                                                heartbeat.kick();
                                             }
                                         }
                                     }
@@ -387,6 +393,7 @@ export class OpenAIProxy {
                                         console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
                                     }
                                 } finally {
+                                    heartbeat.stop();
                                     clientSignal.removeEventListener( 'abort', onClientAbort );
                                     try { reader.releaseLock(); } catch { /* ignore */ }
                                 }
@@ -1342,133 +1349,116 @@ export class OpenAIProxy {
         requestStartedAt: number,
     ): Promise<Response> {
         const endpoint = 'responses';
-        // Write directly to the raw Node.js ServerResponse to bypass Hono's
-        // TransformStream intermediary which causes data to be lost before
-        // the HTTP connection fully closes.
-        const outgoing = ( c.env as any ).outgoing as import( 'node:http' ).ServerResponse;
-        if ( !outgoing || outgoing.destroyed || outgoing.writableEnded ) {
-            return c.json( { error: { message: 'Connection closed', type: 'upstream_error' } }, 502 );
-        }
-
-        outgoing.writeHead( 200, {
-            'Content-Type': 'text/event-stream',
-            'Transfer-Encoding': 'chunked',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-        } );
-
-        const reader = response.body!.getReader();
+        const encoder = new TextEncoder();
+        const upstreamReader = response.body!.getReader();
         const decoder = new TextDecoder();
         const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
         let firstChunkLogged = false;
         let clientDisconnected = false;
         let sseBuffer = '';
 
+        c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+        c.header( 'Transfer-Encoding', 'chunked' );
+        c.header( 'Cache-Control', 'no-cache, no-transform' );
+        c.header( 'Connection', 'keep-alive' );
+        c.header( 'X-Accel-Buffering', 'no' );
+
         const clientSignal = c.req.raw.signal;
         const onClientAbort = () => {
             clientDisconnected = true;
-            reader.cancel( 'client disconnected' ).catch( () => {} );
+            upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
         };
         clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
-        const writeSSE = ( data: string ) => {
-            if ( clientDisconnected || outgoing.destroyed || outgoing.writableEnded ) return false;
-            try {
-                return outgoing.write( data );
-            } catch { return false; }
-        };
+        let heartbeat: ReturnType<typeof startStreamHeartbeat> | null = null;
 
-        const emitCompleted = () => {
-            if ( responsesState.finished || clientDisconnected ) return;
-            const out: string[] = [];
-            processChatStreamChunkForResponses( null, responsesState, out );
-            if ( out.length ) writeSSE( out.join( '' ) );
-        };
+        const stream = new ReadableStream( {
+            start( controller ) {
+                heartbeat = startStreamHeartbeat(
+                    ( chunk ) => { try { controller.enqueue( encoder.encode( chunk ) ); } catch { /* ignore */ } },
+                    { isClientConnected: () => !clientDisconnected }
+                );
 
-        try {
-            while ( !clientDisconnected ) {
-                const { done, value } = await reader.read();
-                if ( done ) break;
-                if ( value && !firstChunkLogged ) {
-                    firstChunkLogged = true;
-                    console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
-                }
-                if ( value ) {
-                    sseBuffer += decoder.decode( value, { stream: true } );
-                }
+                const processChunk = ( sseBuffer: string ): string => {
+                    const out: string[] = [];
+                    const parts = sseBuffer.split( '\n\n' );
+                    const remainder = parts.pop() ?? '';
 
-                const out: string[] = [];
-                const parts = sseBuffer.split( '\n\n' );
-                sseBuffer = parts.pop() ?? '';
+                    for ( const block of parts ) {
+                        const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
+                        if ( !dataLine ) continue;
 
-                for ( const block of parts ) {
-                    const dataLine = block.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
-                    if ( !dataLine ) continue;
-
-                    const data = dataLine.slice( 5 ).trimStart();
-                    if ( !data || data === '[DONE]' ) {
-                        processChatStreamChunkForResponses( null, responsesState, out );
-                    } else {
-                        try {
-                            const chunk = JSON.parse( data );
-                            processChatStreamChunkForResponses( chunk, responsesState, out );
-                        } catch { /* ignore malformed chunks */ }
+                        const data = dataLine.slice( 5 ).trimStart();
+                        if ( !data || data === '[DONE]' ) {
+                            processChatStreamChunkForResponses( null, responsesState, out );
+                        } else {
+                            try {
+                                const chunk = JSON.parse( data );
+                                processChatStreamChunkForResponses( chunk, responsesState, out );
+                            } catch { /* ignore malformed chunks */ }
+                        }
                     }
-                }
 
-                if ( out.length ) writeSSE( out.join( '' ) );
+                    if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
+                    return remainder;
+                };
 
-                if ( responsesState.finished ) break;
-            }
+                ( async () => {
+                    try {
+                        while ( !clientDisconnected ) {
+                            const { done, value } = await upstreamReader.read();
+                            if ( done ) break;
+                            if ( value && !firstChunkLogged ) {
+                                firstChunkLogged = true;
+                                console.info( `[${endpoint}] stream_first_chunk provider=${providerId} model=${selectedModel} firstByteMs=${Date.now() - requestStartedAt}` );
+                            }
+                            if ( value ) {
+                                sseBuffer += decoder.decode( value, { stream: true } );
+                            }
 
-            // Flush remaining buffer
-            if ( sseBuffer.trim() && !clientDisconnected ) {
-                const out: string[] = [];
-                const dataLine = sseBuffer.split( '\n' ).find( ( l ) => l.startsWith( 'data:' ) );
-                if ( dataLine ) {
-                    const data = dataLine.slice( 5 ).trimStart();
-                    if ( !data || data === '[DONE]' ) {
+                            sseBuffer = processChunk( sseBuffer );
+                            heartbeat?.kick();
+
+                            if ( responsesState.finished ) break;
+                        }
+
+                        // Flush remaining buffer
+                        if ( sseBuffer.trim() && !clientDisconnected ) {
+                            processChunk( sseBuffer + '\n\n' );
+                        }
+
+                        // Safety net: emit response.completed if upstream closed without [DONE]/finish_reason
+                        if ( !responsesState.finished && !clientDisconnected ) {
+                            const out: string[] = [];
+                            processChatStreamChunkForResponses( null, responsesState, out );
+                            if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
+                        }
+
+                        if ( !clientDisconnected ) {
+                            console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+                        }
+                    } catch ( err: any ) {
+                        console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
+                        const out: string[] = [];
                         processChatStreamChunkForResponses( null, responsesState, out );
-                    } else {
-                        try {
-                            const chunk = JSON.parse( data );
-                            processChatStreamChunkForResponses( chunk, responsesState, out );
-                        } catch { /* ignore */ }
+                        controller.enqueue( encoder.encode( [
+                            ...out,
+                            `event: error\ndata: ${JSON.stringify( {
+                                type: 'error',
+                                error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
+                            } )}\n\n`,
+                        ].join( '' ) ) );
+                    } finally {
+                        heartbeat?.stop();
+                        clientSignal.removeEventListener( 'abort', onClientAbort );
+                        try { upstreamReader.releaseLock(); } catch { /* ignore */ }
+                        controller.close();
                     }
-                }
-                if ( out.length ) writeSSE( out.join( '' ) );
-            }
+                } )();
+            },
+        } );
 
-            // Safety net: emit response.completed if upstream closed without [DONE]/finish_reason
-            emitCompleted();
-
-            // Small delay to ensure TCP pushes the last chunk
-            if ( !clientDisconnected ) {
-                await new Promise( ( r ) => setTimeout( r, 50 ) );
-            }
-
-            if ( !clientDisconnected ) {
-                outgoing.end();
-                console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
-            }
-        } catch ( err: any ) {
-            console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
-            emitCompleted();
-            writeSSE( `event: error\ndata: ${JSON.stringify( {
-                type: 'error',
-                error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
-            } )}\n\n` );
-            if ( !outgoing.writableEnded ) outgoing.end();
-        } finally {
-            clientSignal.removeEventListener( 'abort', onClientAbort );
-            try { reader.releaseLock(); } catch { /* ignore */ }
-        }
-
-        // Return a dummy Response — the real response has been written directly
-        // to the raw socket above. Hono/node-server will not process this further
-        // because headers are already sent.
-        return new Response( null, { status: 200 } );
+        return new Response( stream, { status: 200 } );
     }
 
     private buildApiUrl( config: OpenAIModelConfig, endpoint: string ): string {

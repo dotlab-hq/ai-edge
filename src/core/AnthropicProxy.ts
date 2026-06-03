@@ -15,7 +15,6 @@ import { codeInterpreterHandler } from './CodeInterpreterHandler';
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
-import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -145,17 +144,6 @@ export class AnthropicProxy {
       }
     }
 
-    const maxRedirects = 5;
-    let redirectDepth = 1;
-    if ( redirectDepth > maxRedirects ) {
-      return c.json( {
-        error: {
-          message: 'Maximum redirect depth exceeded',
-          type: 'invalid_request_error',
-        },
-      }, 400 );
-    }
-
     const endpoint = 'messages';
     const matchingBackends = this.getBackendsForModel( requestedModel, requiredModalities );
     if ( !matchingBackends.length ) {
@@ -170,225 +158,198 @@ export class AnthropicProxy {
 
     const backends = this.getOptimizedBackends( requestedModel, matchingBackends, requiredModalities );
 
-    c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
-    c.header( 'Transfer-Encoding', 'chunked' );
-    c.header( 'Cache-Control', 'no-cache, no-transform' );
-    c.header( 'Connection', 'keep-alive' );
-    c.header( 'X-Accel-Buffering', 'no' );
+    const backendIds = backends.map( b => b.id ).join( ', ' );
+    console.error( `[${endpoint}] Attempting OpenAI backends for model ${requestedModel}: ${backendIds}` );
 
-    return stream( c, async ( streamWriter ) => {
-      let clientDisconnected = false;
-      const clientSignal = c.req.raw.signal;
-      const onClientAbort = () => { clientDisconnected = true; };
-      clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+    for ( const config of backends ) {
+      const candidateModels = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
 
-      const heartbeat = startStreamHeartbeat(
-        ( chunk ) => streamWriter.write( chunk ),
-        { isClientConnected: () => !clientDisconnected }
-      );
-
-      try {
-        await streamWriter.write( ': keepalive\n\n' );
-        heartbeat.kick();
-
-        const backendIds = backends.map( b => b.id ).join( ', ' );
-        console.error( `[${endpoint}] Attempting OpenAI backends for model ${requestedModel}: ${backendIds}` );
-
-        let lastFailure: { status: number; payload: any } | null = null;
-
-        for ( const config of backends ) {
-          if ( clientDisconnected ) break;
-          const candidateModels = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
-
-          for ( const selectedModel of candidateModels ) {
-            if ( clientDisconnected ) break;
-
-            const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
-            if ( cooldownRemainingMs > 0 ) {
-              console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
-              continue;
-            }
-
-            const tokens = this.calculateTokenCount( body );
-            const rateLimit = this.getEffectiveRateLimit( config );
-            const rateCheck = await rateLimitManager.checkAndConsume(
-              config.id,
-              tokens,
-              rateLimit,
-              selectedModel
-            );
-
-            if ( !rateCheck.allowed ) {
-              console.error( `[${endpoint}] Rate limit exceeded for ${config.id} - need ${tokens} tokens` );
-              continue;
-            }
-
-            try {
-              const convertedRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
-              const withReasoning = this.withReasoningEffort( convertedRequest, body, config, selectedModel );
-              const openAIRequest = this.isGeminiProvider( config )
-                ? this.ensureToolCallThoughtSignatures( withReasoning )
-                : withReasoning;
-              const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
-              const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
-              const upstreamRequestStartedAt = Date.now();
-              if ( isDebugEnabled() ) {
-                console.info( `[messages] upstream_request model=${selectedModel} body=${JSON.stringify( redactForLog( openAIRequest ) )}` );
-              }
-
-              const response = await fetchWithProxy( url, {
-                method: 'POST',
-                headers: this.buildHeaders( config, openAIRequest.stream === true ),
-                body: JSON.stringify( openAIRequest ),
-              }, CONFIG.proxy, { skipTimeout: openAIRequest.stream === true } );
-              const upstreamResponseReceivedAt = Date.now();
-
-              backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
-              if ( response.status === 429 ) {
-                this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                continue;
-              }
-
-              const contentType = response.headers.get( 'content-type' ) ?? '';
-              if ( openAIRequest.stream === true && response.ok && response.body && contentType.includes( 'text/event-stream' ) ) {
-                heartbeat.stop();
-                const serverTiming = formatTimingEntries( {
-                  body_parse: bodyParsedAt - requestStartedAt,
-                  web_search: webSearchCompletedAt - requestStartedAt,
-                  upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
-                  total: upstreamResponseReceivedAt - upstreamRequestStartedAt,
-                } );
-                if ( serverTiming ) {
-                  c.header( 'Server-Timing', serverTiming );
-                }
-                console.info( `[messages] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
-                this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                await relayUpstreamToStreamWriter(
-                  c,
-                  response,
-                  requestedModel,
-                  streamWriter,
-                  webSearchContext.searchResponse ? this.buildAnthropicWebSearchBlocks( webSearchContext.searchResponse ) : undefined,
-                  requestStartedAt
-                );
-                clientSignal.removeEventListener( 'abort', onClientAbort );
-                return;
-              }
-
-              const transformStartedAt = Date.now();
-              const payload = await this.parseResponsePayload( response );
-              if ( isDebugEnabled() ) {
-                console.info( `[messages] upstream_response model=${selectedModel} status=${response.status} body=${JSON.stringify( redactForLog( payload ) )}` );
-              }
-
-              if ( !response.ok ) {
-                lastFailure = {
-                  status: response.status,
-                  payload,
-                };
-                this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
-                continue;
-              }
-
-              if ( !payload || typeof payload !== 'object' || Array.isArray( payload ) ) {
-                lastFailure = {
-                  status: 502,
-                  payload: {
-                    error: {
-                      message: 'Upstream returned invalid OpenAI response',
-                      type: 'upstream_error',
-                    },
-                  },
-                };
-                continue;
-              }
-
-              const responsePayload = payload as any;
-              const promptTokens = this.calculateTokenCount( body );
-              const completionTokens = this.countTokensFromContent( responsePayload?.choices?.[0]?.message?.content ?? '' );
-              const normalizedResponse = responsePayload.usage
-                ? responsePayload
-                : {
-                  ...responsePayload,
-                  usage: {
-                    prompt_tokens: promptTokens,
-                    completion_tokens: completionTokens,
-                    total_tokens: promptTokens + completionTokens,
-                  },
-                };
-
-              const anthropicResponse = convertOpenAIResponseToAnthropic( normalizedResponse, requestedModel );
-              const responseWithToolSearch = this.attachAnthropicToolSearchUsage( anthropicResponse, hadToolSearchRequest );
-              const responseWithWebSearch = this.webSearchHandler.attachAnthropicWebSearchMetadata( responseWithToolSearch, webSearchContext.searchResponse );
-              const transformMs = Date.now() - transformStartedAt;
-              const totalMs = Date.now() - requestStartedAt;
-              const serverTiming = formatTimingEntries( {
-                body_parse: bodyParsedAt - requestStartedAt,
-                web_search: webSearchCompletedAt - requestStartedAt,
-                upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
-                transform: transformMs,
-                total: totalMs,
-              } );
-              if ( serverTiming ) {
-                c.header( 'Server-Timing', serverTiming );
-              }
-              console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
-              this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-              heartbeat.stop();
-              const errorOut: string[] = [];
-              const finalPayload = this.attachUsageIfMissing( endpoint, body, responseWithWebSearch );
-              errorOut.push( `event: message\ndata: ${JSON.stringify( finalPayload )}\n\n` );
-              errorOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
-              await streamWriter.write( errorOut.join( '' ) );
-              clientSignal.removeEventListener( 'abort', onClientAbort );
-              return;
-            } catch ( error: any ) {
-              this.providerStats.recordFailure( config.id, selectedModel );
-              lastFailure = {
-                status: 502,
-                payload: {
-                  error: {
-                    message: error?.message || 'Upstream request failed',
-                    type: 'upstream_error',
-                  },
-                },
-              };
-              console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
-              continue;
-            }
-          }
+      for ( const selectedModel of candidateModels ) {
+        const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+        if ( cooldownRemainingMs > 0 ) {
+          console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+          continue;
         }
 
-        heartbeat.stop();
-        if ( lastFailure ) {
-          const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
-          console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
-          console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
-          const errOut: string[] = [];
-          errOut.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'api_error', message: typeof lastFailure.payload === 'object' && lastFailure.payload?.error?.message ? lastFailure.payload.error.message : 'Upstream request failed' } } )}\n\n` );
-          errOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
-          await streamWriter.write( errOut.join( '' ) );
-        } else {
-          console.error( `\n❌ [${endpoint}] ALL OPENAI PROVIDERS FAILED - No response from any backend\nModel: ${requestedModel}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
-          console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
-          const errOut: string[] = [];
-          errOut.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'internal_error', message: 'All providers failed' } } )}\n\n` );
-          errOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
-          await streamWriter.write( errOut.join( '' ) );
+        const tokens = this.calculateTokenCount( body );
+        const rateLimit = this.getEffectiveRateLimit( config );
+        const rateCheck = await rateLimitManager.checkAndConsume(
+          config.id,
+          tokens,
+          rateLimit,
+          selectedModel
+        );
+
+        if ( !rateCheck.allowed ) {
+          console.error( `[${endpoint}] Rate limit exceeded for ${config.id} - need ${tokens} tokens` );
+          continue;
         }
-        clientSignal.removeEventListener( 'abort', onClientAbort );
-      } catch ( err: any ) {
-        heartbeat.stop();
-        clientSignal.removeEventListener( 'abort', onClientAbort );
+
         try {
-          const errOut: string[] = [];
-          errOut.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'api_error', message: err?.message || 'Unexpected error' } } )}\n\n` );
-          errOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
-          await streamWriter.write( errOut.join( '' ) );
-        } catch { /* ignore secondary error */ }
+          const convertedRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
+          const withReasoning = this.withReasoningEffort( convertedRequest, body, config, selectedModel );
+          const openAIRequest = this.isGeminiProvider( config )
+            ? this.ensureToolCallThoughtSignatures( withReasoning )
+            : withReasoning;
+          const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
+          const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
+          const upstreamRequestStartedAt = Date.now();
+          if ( isDebugEnabled() ) {
+            console.info( `[messages] upstream_request model=${selectedModel} body=${JSON.stringify( redactForLog( openAIRequest ) )}` );
+          }
+
+          // Fetch upstream OUTSIDE of stream() to avoid ReadableStream conflicts
+          const response = await fetchWithProxy( url, {
+            method: 'POST',
+            headers: this.buildHeaders( config, openAIRequest.stream === true ),
+            body: JSON.stringify( openAIRequest ),
+          }, CONFIG.proxy, { skipTimeout: openAIRequest.stream === true } );
+          const upstreamResponseReceivedAt = Date.now();
+
+          backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
+          if ( response.status === 429 ) {
+            this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+            continue;
+          }
+
+          const contentType = response.headers.get( 'content-type' ) ?? '';
+          if ( openAIRequest.stream === true && response.ok && response.body && contentType.includes( 'text/event-stream' ) ) {
+            const serverTiming = formatTimingEntries( {
+              body_parse: bodyParsedAt - requestStartedAt,
+              web_search: webSearchCompletedAt - requestStartedAt,
+              upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+              total: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+            } );
+            if ( serverTiming ) {
+              c.header( 'Server-Timing', serverTiming );
+            }
+            console.info( `[messages] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
+            this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+
+            // Now enter stream() with the already-fetched response
+            c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+            c.header( 'Transfer-Encoding', 'chunked' );
+            c.header( 'Cache-Control', 'no-cache, no-transform' );
+            c.header( 'Connection', 'keep-alive' );
+            c.header( 'X-Accel-Buffering', 'no' );
+            return stream( c, async ( streamWriter ) => {
+              await streamWriter.write( ': keepalive\n\n' );
+              await relayUpstreamToStreamWriter(
+                c,
+                response,
+                requestedModel,
+                streamWriter,
+                webSearchContext.searchResponse ? this.buildAnthropicWebSearchBlocks( webSearchContext.searchResponse ) : undefined,
+                requestStartedAt
+              );
+            } );
+          }
+
+          const transformStartedAt = Date.now();
+          const payload = await this.parseResponsePayload( response );
+          if ( isDebugEnabled() ) {
+            console.info( `[messages] upstream_response model=${selectedModel} status=${response.status} body=${JSON.stringify( redactForLog( payload ) )}` );
+          }
+
+          if ( !response.ok ) {
+            lastFailure = {
+              status: response.status,
+              payload,
+            };
+            this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+            console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
+            continue;
+          }
+
+          if ( !payload || typeof payload !== 'object' || Array.isArray( payload ) ) {
+            lastFailure = {
+              status: 502,
+              payload: {
+                error: {
+                  message: 'Upstream returned invalid OpenAI response',
+                  type: 'upstream_error',
+                },
+              },
+            };
+            continue;
+          }
+
+          const responsePayload = payload as any;
+          const promptTokens = this.calculateTokenCount( body );
+          const completionTokens = this.countTokensFromContent( responsePayload?.choices?.[0]?.message?.content ?? '' );
+          const normalizedResponse = responsePayload.usage
+            ? responsePayload
+            : {
+              ...responsePayload,
+              usage: {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+              },
+            };
+
+          const anthropicResponse = convertOpenAIResponseToAnthropic( normalizedResponse, requestedModel );
+          const responseWithToolSearch = this.attachAnthropicToolSearchUsage( anthropicResponse, hadToolSearchRequest );
+          const responseWithWebSearch = this.webSearchHandler.attachAnthropicWebSearchMetadata( responseWithToolSearch, webSearchContext.searchResponse );
+          const transformMs = Date.now() - transformStartedAt;
+          const totalMs = Date.now() - requestStartedAt;
+          const serverTiming = formatTimingEntries( {
+            body_parse: bodyParsedAt - requestStartedAt,
+            web_search: webSearchCompletedAt - requestStartedAt,
+            upstream: upstreamResponseReceivedAt - upstreamRequestStartedAt,
+            transform: transformMs,
+            total: totalMs,
+          } );
+          if ( serverTiming ) {
+            c.header( 'Server-Timing', serverTiming );
+          }
+          console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
+          this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+          const finalPayload = this.attachUsageIfMissing( endpoint, body, responseWithWebSearch );
+          const sseOut: string[] = [];
+          sseOut.push( `event: message\ndata: ${JSON.stringify( finalPayload )}\n\n` );
+          sseOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
+          c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+          c.header( 'Cache-Control', 'no-cache, no-transform' );
+          c.header( 'X-Accel-Buffering', 'no' );
+          return c.text( sseOut.join( '' ) );
+        } catch ( error: any ) {
+          this.providerStats.recordFailure( config.id, selectedModel );
+          lastFailure = {
+            status: 502,
+            payload: {
+              error: {
+                message: error?.message || 'Upstream request failed',
+                type: 'upstream_error',
+              },
+            },
+          };
+          console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
+          continue;
+        }
       }
-    } );
+    }
+
+    if ( lastFailure ) {
+      const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
+      console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+      console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
+      const errSse: string[] = [];
+      errSse.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'api_error', message: typeof lastFailure.payload === 'object' && lastFailure.payload?.error?.message ? lastFailure.payload.error.message : 'Upstream request failed' } } )}\n\n` );
+      errSse.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
+      c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+      c.header( 'Cache-Control', 'no-cache, no-transform' );
+      return c.text( errSse.join( '' ) );
+    }
+
+    console.error( `\n❌ [${endpoint}] ALL OPENAI PROVIDERS FAILED - No response from any backend\nModel: ${requestedModel}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+    console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
+    const errSse: string[] = [];
+    errSse.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'internal_error', message: 'All providers failed' } } )}\n\n` );
+    errSse.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
+    c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+    c.header( 'Cache-Control', 'no-cache, no-transform' );
+    return c.text( errSse.join( '' ) );
   }
 
   private async handleMessagesBatches( c: Context ) {

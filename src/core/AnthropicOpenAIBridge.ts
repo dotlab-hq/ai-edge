@@ -111,7 +111,7 @@ export async function streamOpenAIResponseAsAnthropic(
 
         try {
             const initialOut: SseOut = [': stream-start\n\n'];
-            flushOut( initialOut, streamWriter, heartbeat );
+            await flushOut( initialOut, streamWriter, heartbeat );
 
             while ( !clientDisconnected ) {
                 const { done, value } = await reader.read();

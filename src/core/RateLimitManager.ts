@@ -117,7 +117,7 @@ export class RateLimitManager {
             try {
                 await Promise.race( [
                     existing.promise,
-                    this.timeoutPromise( Date.now() - existing.expires )
+                    this.timeoutPromise( existing.expires - Date.now() )
                 ] );
                 // After waiting, clean up expired locks again and retry
                 this.cleanupExpiredLocks();
