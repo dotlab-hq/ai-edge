@@ -293,6 +293,10 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
         if ( !config ) {
             return;
         }
+        // Skip non-chat providers from the model catalog (STT, TTS, embeddings, image-only)
+        if ( config.stt === true || config.tts === true || config.embeddings === true || config.imageModels ) {
+            return;
+        }
         allProviderNames.add( catalog.providerName );
 
         const upstreamModelsByNormalizedId = new Map<string, CatalogModel>();
