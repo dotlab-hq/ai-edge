@@ -37,3 +37,6 @@ model.json
 model.yaml
 model.yml
 model.toml
+
+# cloned repos
+codex/

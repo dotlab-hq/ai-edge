@@ -3,10 +3,11 @@ import chalk from 'chalk';
 import path from 'path';
 import net from 'node:net';
 import { access } from 'node:fs/promises';
-import { serve } from '@hono/node-server';
+import { createAdaptorServer } from '@hono/node-server';
 import { decodeConfigFromEnv, readConfig } from '../../utils/readConfig';
 import { getConfigFileName } from '../utils/template';
 import { createNodeServerFactoryWithNoDelay } from '../../utils/proxyFetch';
+import { setupResponsesWebSocket } from '../../core/ResponsesWebSocket';
 
 const DEFAULT_PORT = 25789;
 
@@ -122,7 +123,14 @@ Debug: ${debugEnabled ? 'enabled' : 'disabled'}`,
     try {
       const { default: app } = await import( '../../../server' );
 
-      serve( { fetch: app.fetch, port: portNum, createServer: createNodeServerFactoryWithNoDelay() } );
+      const server = createAdaptorServer( {
+          fetch: app.fetch,
+          createServer: createNodeServerFactoryWithNoDelay() as any,
+      } );
+
+      setupResponsesWebSocket( server as any );
+
+      server.listen( portNum );
 
       s2.stop( `✅ Server running on http://localhost:${portNum}` );
 

@@ -1,10 +1,9 @@
-curl http://localhost:8888/anthropic/v1/messages \
+curl http://localhost:8888/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $ANTHROPIC_API_KEY" \
-  -H "anthropic-version: 2023-06-01" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
     "stream": true,
-    "model": "claude-sonnet-4-20250514",
+    "model": "auto-vgedge",
     "max_tokens": 1024,
     "messages": [
       {

@@ -399,10 +399,12 @@ export class AnthropicProxy {
     }
 
     const configs = CONFIG.models.openai || [];
-    const isAutoModel = this.isAutoModel( modelName );
+    const explicitlyAuto = this.isAutoModel( modelName );
     const modelIsListed = configs.some( config =>
       this.configHasModel( config, modelName )
     );
+    // Unlisted models are treated as auto-edge: route through all available backends.
+    const isAutoModel = explicitlyAuto || !modelIsListed;
 
     const exactBackends: OpenAIModelConfig[] = [];
     const fallbackBackends: OpenAIModelConfig[] = [];
@@ -527,7 +529,14 @@ export class AnthropicProxy {
   }
 
   private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] = ['text'] ): string[] {
-    const isAutoModel = this.isAutoModel( requestedModel );
+    const explicitlyAuto = this.isAutoModel( requestedModel );
+    const modelInThisProvider = config.models.some( m => {
+      const candidate = typeof m === 'string' ? m : ( m as any ).model;
+      return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( requestedModel ).normalizedId;
+    } );
+    // Unlisted models treated as auto-edge: pick best model from provider.
+    const isAutoModel = explicitlyAuto || !modelInThisProvider;
+
     if ( config.randomRouting === false && !isAutoModel && this.modelSupportsModalities( config, requestedModel, requiredModalities ) ) {
       return [requestedModel];
     }
@@ -535,9 +544,7 @@ export class AnthropicProxy {
     const modelNames = config.models
       .filter( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) )
       .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-    const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
-    const normalizedModels = modelNames.map( modelName => stripFreeModifier( modelName ).normalizedId );
-    if ( !isAutoModel && normalizedModels.includes( requestedNormalized ) ) {
+    if ( !isAutoModel ) {
       return [requestedModel];
     }
     const uniqueModels: string[] = Array.from( new Set( modelNames ) );

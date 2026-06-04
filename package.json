@@ -1,6 +1,6 @@
 {
   "name": "ai-edge",
-  "version": "1.0.39",
+  "version": "1.0.40",
   "description": "Local LLM routing server with OpenAI compatibility",
   "type": "module",
   "bin": {
@@ -51,6 +51,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^6.0.3"
   },
   "peerDependencies": {
@@ -69,6 +70,7 @@
     "json5": "^2.2.3",
     "langchain": "^1.4.0",
     "undici": "^7.14.0",
+    "ws": "^8.21.0",
     "zod": "^4.4.1"
   }
 }

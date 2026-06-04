@@ -28,6 +28,8 @@ import {
     convertChatResponseToResponses,
     createResponsesStreamState,
     processChatStreamChunkForResponses,
+    emitResponsesCompleted,
+    emitResponsesDoneSentinel,
 } from './ResponsesConversion';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
@@ -56,6 +58,7 @@ export class OpenAIProxy {
     private setupRoutes(): void {
         this.app.get( '/v1/models', ( c: Context ) => this.handleModels( c ) );
         this.app.post( '/v1/responses', ( c: Context ) => this.handleResponses( c ) );
+        this.app.post( '/v1/responses/compact', ( c: Context ) => this.handleResponsesCompact( c ) );
         this.app.post( '/v1/chat/completions', ( c: Context ) => this.handleChatCompletions( c ) );
         this.app.post( '/v1/embeddings', ( c: Context ) => this.handleEmbeddings( c ) );
         this.app.post( '/v1/completions', ( c: Context ) => this.handleCompletions( c ) );
@@ -84,6 +87,76 @@ export class OpenAIProxy {
 
     private async handleResponses( c: Context ) {
         return this.handleOpenAIRequest( c, 'responses' );
+    }
+
+    private async handleResponsesCompact( c: Context ) {
+        const rawBody = await c.req.json().catch( () => ( {} ) );
+        const input = rawBody.input as any[] | undefined;
+        const model = rawBody.model as string | undefined;
+
+        if ( !model ) {
+            return c.json( {
+                error: { message: 'model is required', type: 'invalid_request_error' },
+            }, 400 );
+        }
+
+        if ( !Array.isArray( input ) || input.length === 0 ) {
+            return c.json( {
+                error: { message: 'input must be a non-empty array', type: 'invalid_request_error' },
+            }, 400 );
+        }
+
+        // Separate system/developer messages from conversation messages
+        const systemItems: any[] = [];
+        const conversationItems: any[] = [];
+
+        for ( const item of input ) {
+            const role = item?.role as string | undefined;
+            if ( role === 'system' || role === 'developer' ) {
+                systemItems.push( item );
+            } else {
+                conversationItems.push( item );
+            }
+        }
+
+        // Keep the last N conversation items to stay within a reasonable token window
+        const maxConversationItems = 40;
+        const keptConversation = conversationItems.length > maxConversationItems
+            ? conversationItems.slice( conversationItems.length - maxConversationItems )
+            : conversationItems;
+
+        // Summarize dropped items into a summary message if any were dropped
+        const droppedCount = conversationItems.length - keptConversation.length;
+        const output: any[] = [ ...systemItems ];
+
+        if ( droppedCount > 0 ) {
+            output.push( {
+                type: 'message',
+                role: 'user',
+                content: [
+                    {
+                        type: 'input_text',
+                        text: `[Context compacted: ${droppedCount} earlier messages were summarized to fit within context limits.]`,
+                    },
+                ],
+            } );
+        }
+
+        output.push( ...keptConversation );
+
+        return c.json( {
+            id: `compact_${Date.now().toString( 36 )}`,
+            object: 'response.compact',
+            model,
+            output,
+            usage: {
+                input_tokens: Math.ceil( JSON.stringify( output ).length / 4 ),
+                input_tokens_details: { cached_tokens: 0 },
+                output_tokens: 0,
+                output_tokens_details: { reasoning_tokens: 0 },
+                total_tokens: Math.ceil( JSON.stringify( output ).length / 4 ),
+            },
+        } );
     }
 
     private async handleChatCompletions( c: Context ) {
@@ -123,7 +196,7 @@ export class OpenAIProxy {
         return this.proxyRequest( c, endpoint, 1, normalizedBody );
     }
 
-    private normalizeToolSearchForEndpoint( body: any, endpoint: string ): any {
+    public normalizeToolSearchForEndpoint( body: any, endpoint: string ): any {
         if ( endpoint === 'responses' || !Array.isArray( body?.tools ) ) {
             return body;
         }
@@ -245,9 +318,26 @@ export class OpenAIProxy {
             }, 400 );
         }
 
+        // Track whether Codex expects SSE events (Responses API + streaming)
+        const isStreamingResponses = endpoint === 'responses' && body.stream === true;
+
         const matchingBackends = this.getBackendsForModel( modelName, endpoint );
         if ( !matchingBackends.length ) {
             console.error( `[${endpoint}] No backends found for model: ${modelName}` );
+
+            // For Responses API with streaming, Codex expects SSE events.
+            // Return a proper Responses-format error via SSE so the client
+            // doesn't hang waiting for `response.completed`.
+            if ( isStreamingResponses ) {
+                return this.sendResponsesStreamError( modelName, `Model not found: ${modelName}` );
+            }
+
+            // Responses-API request that was converted to chat/completions also
+            // needs SSE error so Codex doesn't hang.
+            if ( originalResponsesBody ) {
+                return this.sendResponsesStreamError( modelName, `Model not found: ${modelName}` );
+            }
+
             return c.json( {
                 error: {
                     message: `Model not found: ${modelName}`,
@@ -319,6 +409,27 @@ export class OpenAIProxy {
                                 return this.proxyRequest( c, endpoint, redirectDepth + 1, { ...body, model: redirectModel } );
                             }
                         }
+                    }
+
+                    // ── Non-2xx check for streaming ──
+                    // Must come BEFORE the streaming block. When the upstream
+                    // returns an error (401, 500, etc.) with stream=true, the
+                    // response body is usually JSON, not SSE.  Without this
+                    // check the proxy would try to parse the error as SSE and
+                    // silently return empty output to the client.
+                    if ( !response.ok ) {
+                        lastFailure = {
+                            status: response.status,
+                            payload: await this.parseResponsePayload( response ),
+                        };
+                        this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+                        console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name} — skipping streaming path` );
+                        // For Responses API streaming, emit an SSE error so
+                        // the client doesn't hang waiting for response.completed.
+                        if ( originalResponsesBody ) {
+                            return this.sendResponsesStreamError( selectedModel, lastFailure.payload?.error?.message || `Upstream returned ${response.status}` );
+                        }
+                        continue;
                     }
 
                     // Handle streaming responses
@@ -473,11 +584,33 @@ export class OpenAIProxy {
             const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
             console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
             console.info( `[${endpoint}] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt}` );
+
+            // For Responses API with streaming, return SSE error so Codex doesn't hang
+            if ( isStreamingResponses ) {
+                return this.sendResponsesStreamError( modelName, typeof lastFailure.payload === 'object' ? lastFailure.payload?.error?.message || JSON.stringify( lastFailure.payload ) : String( lastFailure.payload ) );
+            }
+
+            // Responses-API request (converted to chat) also needs SSE error
+            if ( originalResponsesBody ) {
+                return this.sendResponsesStreamError( modelName, typeof lastFailure.payload === 'object' ? lastFailure.payload?.error?.message || JSON.stringify( lastFailure.payload ) : String( lastFailure.payload ) );
+            }
+
             return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
         }
 
         console.error( `\n❌ [${endpoint}] ALL PROVIDERS FAILED - No response from any backend\nModel: ${modelName}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
         console.info( `[${endpoint}] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt}` );
+
+        // For Responses API with streaming, return SSE error so Codex doesn't hang
+        if ( isStreamingResponses ) {
+            return this.sendResponsesStreamError( modelName, 'All providers failed' );
+        }
+
+        // Responses-API request (converted to chat) also needs SSE error
+        if ( originalResponsesBody ) {
+            return this.sendResponsesStreamError( modelName, 'All providers failed' );
+        }
+
         return c.json( {
             error: {
                 message: 'All providers failed',
@@ -1002,10 +1135,12 @@ export class OpenAIProxy {
         }
 
         const configs = CONFIG.models.openai ?? [];
-        const isAutoModel = this.isAutoModel( modelName );
+        const explicitlyAuto = this.isAutoModel( modelName );
         const modelIsListed = configs.some( config =>
             this.configHasModel( config, modelName )
         );
+        // Unlisted models are treated as auto-edge: route through all available backends.
+        const isAutoModel = explicitlyAuto || !modelIsListed;
 
         const exactBackends: OpenAIModelConfig[] = [];
         const fallbackBackends: OpenAIModelConfig[] = [];
@@ -1184,15 +1319,20 @@ export class OpenAIProxy {
     }
 
     private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {
-        const isAutoModel = this.isAutoModel( requestedModel );
+        const explicitlyAuto = this.isAutoModel( requestedModel );
+        const modelInThisProvider = config.models.some( m => {
+            const candidate = typeof m === 'string' ? m : ( m as any ).model;
+            return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( requestedModel ).normalizedId;
+        } );
+        // Unlisted models treated as auto-edge: pick best model from provider.
+        const isAutoModel = explicitlyAuto || !modelInThisProvider;
+
         if ( config.randomRouting === false && !isAutoModel ) {
             return [requestedModel];
         }
 
         const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-        const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
-        const normalizedModels = modelNames.map( modelName => stripFreeModifier( modelName ).normalizedId );
-        if ( !isAutoModel && normalizedModels.includes( requestedNormalized ) ) {
+        if ( !isAutoModel ) {
             return [requestedModel];
         }
         const uniqueModels = Array.from( new Set( modelNames ) );
@@ -1340,6 +1480,75 @@ export class OpenAIProxy {
         return c.text( String( payload ?? 'Upstream request failed' ), status as any );
     }
 
+    /**
+     * Send a Responses-format SSE error. Used when the upstream fails or model
+     * is not found but Codex expects SSE events (stream: true, wire_api: responses).
+     * Without this, Codex hangs waiting for `response.completed`.
+     */
+    private sendResponsesStreamError( modelName: string, errorMessage?: string ): Response {
+        const encoder = new TextEncoder();
+        const responseId = `resp_${Date.now().toString( 36 )}`;
+        const created = Math.floor( Date.now() / 1000 );
+        const events: string[] = [
+            `event: response.created\ndata: ${JSON.stringify( {
+                type: 'response.created',
+                response: {
+                    id: responseId,
+                    object: 'response',
+                    status: 'in_progress',
+                    created,
+                    model: modelName,
+                    output: [],
+                },
+            } )}\n\n`,
+            `event: response.in_progress\ndata: ${JSON.stringify( {
+                type: 'response.in_progress',
+                response: {
+                    id: responseId,
+                    status: 'in_progress',
+                },
+            } )}\n\n`,
+        ];
+
+        // If there's a real error from the upstream, emit an error event so
+        // the client can surface it instead of silently showing empty output.
+        if ( errorMessage ) {
+            events.push( `event: error\ndata: ${JSON.stringify( {
+                type: 'error',
+                error: { type: 'upstream_error', message: errorMessage },
+            } )}\n\n` );
+        }
+
+        events.push( `event: response.completed\ndata: ${JSON.stringify( {
+            type: 'response.completed',
+            response: {
+                id: responseId,
+                object: 'response',
+                status: 'completed',
+                created,
+                model: modelName,
+                output: [],
+                usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+            },
+        } )}\n\n` );
+
+        emitResponsesDoneSentinel( events );
+        const data = events.join( '' );
+        const stream = new ReadableStream( {
+            start( controller ) {
+                controller.enqueue( encoder.encode( data ) );
+                controller.close();
+            },
+        } );
+        return new Response( stream, {
+            status: 200,
+            headers: {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+            },
+        } );
+    }
+
     private async streamResponsesConverted(
         c: Context,
         response: Response,
@@ -1372,6 +1581,7 @@ export class OpenAIProxy {
 
         const stream = new ReadableStream( {
             start( controller ) {
+                let completedEmitted = false;
 
                 const processChunk = ( sseBuffer: string ): string => {
                     const out: string[] = [];
@@ -1397,6 +1607,53 @@ export class OpenAIProxy {
                     return remainder;
                 };
 
+                /** Emit response.completed exactly once, guaranteed. */
+                const emitCompleted = () => {
+                    if ( completedEmitted ) return;
+                    completedEmitted = true;
+
+                    try {
+                        if ( !responsesState.finished ) {
+                            const out: string[] = [];
+                            processChatStreamChunkForResponses( null, responsesState, out );
+                            if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
+                        }
+                    } catch { /* best-effort */ }
+
+                    try {
+                        const completedOut: string[] = [];
+                        emitResponsesCompleted( responsesState, completedOut );
+                        emitResponsesDoneSentinel( completedOut );
+                        if ( completedOut.length ) {
+                            controller.enqueue( encoder.encode( completedOut.join( '' ) ) );
+                        } else {
+                            console.warn( `[${endpoint}] emitResponsesCompleted produced no events for provider=${providerId} model=${selectedModel}` );
+                        }
+                        console.info( `[${endpoint}] response_completed_emitted provider=${providerId} model=${selectedModel} clientDisconnected=${clientDisconnected} responseId=${responsesState.responseId}` );
+                    } catch ( completedErr: any ) {
+                        console.error( `[${endpoint}] Failed to emit response.completed: ${completedErr?.message || String( completedErr )}` );
+                        // Last resort: emit a minimal response.completed so the client gets *something*
+                        try {
+                            const fallback = [
+                                `event: response.completed\ndata: ${JSON.stringify( {
+                                type: 'response.completed',
+                                response: {
+                                    id: responsesState.responseId,
+                                    object: 'response',
+                                    status: 'completed',
+                                    created: responsesState.created,
+                                    model: responsesState.model,
+                                    output: [],
+                                    usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+                                },
+                            } )}\n\n`,
+                                'data: [DONE]\n\n',
+                            ].join( '' );
+                            controller.enqueue( encoder.encode( fallback ) );
+                        } catch { /* truly nothing we can do */ }
+                    }
+                };
+
                 ( async () => {
                     try {
                         while ( !clientDisconnected ) {
@@ -1412,54 +1669,62 @@ export class OpenAIProxy {
 
                             sseBuffer = processChunk( sseBuffer );
 
-                            if ( responsesState.finished ) break;
+                            // NOTE: Do NOT break when responsesState.finished becomes true here.
+                            // OpenAI's streaming protocol sends the `usage` chunk (with token
+                            // counts) as a SEPARATE SSE message AFTER the `finish_reason` chunk.
+                            // Breaking early would skip that usage chunk, resulting in zero token
+                            // counts in the response.completed event.  Instead, keep reading
+                            // until the upstream closes the connection (`done === true`).
+                            // The processChatStreamChunkForResponses function is idempotent on
+                            // finishResponsesStream, so extra chunks after finish are safe.
                         }
 
                         // Flush remaining buffer
                         if ( sseBuffer.trim() && !clientDisconnected ) {
                             processChunk( sseBuffer + '\n\n' );
                         }
-
-                        // Safety net: emit response.completed if upstream closed without [DONE]/finish_reason
-                        if ( !responsesState.finished && !clientDisconnected ) {
-                            const out: string[] = [];
-                            processChatStreamChunkForResponses( null, responsesState, out );
-                            if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
-                        }
-
-                        if ( !clientDisconnected ) {
-                            console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
-                        }
                     } catch ( err: any ) {
-                        console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
+                        console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )} provider=${providerId} model=${selectedModel}` );
+                        // Finish the stream state so the completed event below has the right status
                         const out: string[] = [];
                         processChatStreamChunkForResponses( null, responsesState, out );
-                        controller.enqueue( encoder.encode( [
-                            ...out,
-                            `event: error\ndata: ${JSON.stringify( {
-                                type: 'error',
-                                error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
-                            } )}\n\n`,
-                        ].join( '' ) ) );
-                    } finally {
-                        // Guarantee response.completed before closing the stream,
-                        // even if the try block errored or the safety net didn't fire.
-                        if ( !responsesState.finished ) {
-                            try {
-                                const out: string[] = [];
-                                processChatStreamChunkForResponses( null, responsesState, out );
-                                if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
-                            } catch { /* stream may already be errored */ }
-                        }
-                        clientSignal.removeEventListener( 'abort', onClientAbort );
-                        try { upstreamReader.releaseLock(); } catch { /* ignore */ }
-                        controller.close();
+                        try {
+                            controller.enqueue( encoder.encode( [
+                                ...out,
+                                `event: error\ndata: ${JSON.stringify( {
+                                    type: 'error',
+                                    error: { type: 'upstream_error', message: err?.message || 'An error occurred during streaming' },
+                                } )}\n\n`,
+                            ].join( '' ) ) );
+                        } catch { /* stream may already be errored */ }
                     }
-                } )();
+
+                    // ── GUARANTEED: emit response.completed before closing ──
+                    // This MUST run even on error. The Codex client disconnects
+                    // if it never receives this event, causing the "stream closed
+                    // before response.completed" error.
+                    emitCompleted();
+
+                    if ( !clientDisconnected ) {
+                        console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
+                    }
+                } )().finally( () => {
+                    clientSignal.removeEventListener( 'abort', onClientAbort );
+                    try { upstreamReader.releaseLock(); } catch { /* ignore */ }
+                    try { controller.close(); } catch { /* stream may already be closed */ }
+                } );
             },
         } );
 
-        return new Response( stream, { status: 200 } );
+        return new Response( stream, {
+            status: 200,
+            headers: {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        } );
     }
 
     private buildApiUrl( config: OpenAIModelConfig, endpoint: string ): string {
@@ -1806,6 +2071,108 @@ export class OpenAIProxy {
         }
 
         return 0;
+    }
+
+    /**
+     * Process an upstream request with full provider fallback logic.
+     * Returns a structured result for callers that manage their own response
+     * transport (e.g. WebSocket).
+     */
+    public async processUpstreamWithFallback( body: any, endpoint: string, options: {
+        responseId: string;
+        model: string;
+        stream?: boolean;
+    } ): Promise<{ status: number; payload?: any; response?: Response; providerId?: string; selectedModel?: string }> {
+        const requestStartedAt = Date.now();
+        const modelName = options.model;
+
+        if ( !modelName || typeof modelName !== 'string' ) {
+            return {
+                status: 400,
+                payload: { error: { message: 'Model is required and must be a string', type: 'invalid_request_error' } },
+            };
+        }
+
+        const matchingBackends = this.getBackendsForModel( modelName, endpoint );
+        if ( !matchingBackends.length ) {
+            console.error( `[ws:${endpoint}] No backends found for model: ${modelName}` );
+            return {
+                status: 400,
+                payload: { error: { message: `Model not found: ${modelName}`, type: 'invalid_request_error' } },
+            };
+        }
+
+        const backends = this.getOptimizedBackends( modelName, endpoint, matchingBackends );
+        console.error( `[ws:${endpoint}] Attempting backends for model ${modelName}: ${backends.map( b => b.id ).join( ', ' )}` );
+
+        for ( const config of backends ) {
+            const candidateModels = this.getCandidateModelsForProvider( config, modelName );
+
+            for ( const selectedModel of candidateModels ) {
+                const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                if ( cooldownRemainingMs > 0 ) {
+                    continue;
+                }
+
+                const requestWithModel = { ...body, model: selectedModel };
+                const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
+                const upstreamBody = this.isGeminiProvider( config )
+                    ? this.ensureToolCallThoughtSignatures( withReasoning )
+                    : withReasoning;
+
+                const tokens = this.calculateTokenCount( upstreamBody );
+                const rateLimit = this.getEffectiveRateLimit( config );
+                const rateCheck = await rateLimitManager.checkAndConsume( config.id, tokens, rateLimit, selectedModel );
+                if ( !rateCheck.allowed ) {
+                    continue;
+                }
+
+                try {
+                    const url = this.buildApiUrl( config, endpoint );
+                    const upstreamResponse = await fetchWithProxy( url, {
+                        method: 'POST',
+                        headers: this.buildHeaders( config ),
+                        body: JSON.stringify( upstreamBody ),
+                    }, CONFIG.proxy, { skipTimeout: upstreamBody.stream === true } );
+
+                    backendCooldownManager.markFromStatus( config.id, selectedModel, upstreamResponse.status );
+                    if ( upstreamResponse.status === 429 ) {
+                        this.providerStats.recordFailure( config.id, selectedModel );
+                        continue;
+                    }
+
+                    if ( this.isRedirectStatus( upstreamResponse.status ) ) {
+                        const location = upstreamResponse.headers.get( 'location' );
+                        if ( location ) {
+                            const redirectModel = this.extractModelFromLocation( location );
+                            if ( redirectModel && redirectModel !== modelName ) {
+                                return this.processUpstreamWithFallback(
+                                    { ...body, model: redirectModel }, endpoint, { ...options, model: redirectModel },
+                                );
+                            }
+                        }
+                    }
+
+                    this.providerStats.recordSuccess( config.id, selectedModel );
+                    return {
+                        status: upstreamResponse.status,
+                        response: upstreamResponse,
+                        providerId: config.id,
+                        selectedModel,
+                    };
+                } catch ( error: any ) {
+                    this.providerStats.recordFailure( config.id, selectedModel );
+                    console.error( `[ws:${endpoint}] Exception from ${config?.id}: ${error?.message || String( error )}` );
+                    continue;
+                }
+            }
+        }
+
+        console.error( `[ws:${endpoint}] ALL PROVIDERS FAILED for model ${modelName}` );
+        return {
+            status: 502,
+            payload: { error: { message: 'All providers failed', type: 'internal_error' } },
+        };
     }
 }
 

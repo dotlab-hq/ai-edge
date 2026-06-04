@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import {
     createResponsesStreamState,
+    emitResponsesCompleted,
     emitResponsesStreamPreamble,
     processChatStreamChunkForResponses,
 } from '../src/core/ResponsesConversion';
@@ -17,7 +18,7 @@ test( 'Responses stream preamble is emitted immediately and only once', () => {
     expect( out.join( '' ) ).toContain( 'event: response.in_progress' );
 } );
 
-test( 'Responses stream completion still uses the same pre-emitted response state', () => {
+test( 'Responses stream finish closes items without re-emitting preamble', () => {
     const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1234 );
     const out: string[] = [];
 
@@ -39,6 +40,33 @@ test( 'Responses stream completion still uses the same pre-emitted response stat
     );
 
     expect( finished ).toBe( true );
-    expect( out.join( '' ) ).toContain( 'event: response.completed' );
+    expect( out.join( '' ) ).toContain( 'event: response.output_item.done' );
     expect( out.join( '' ) ).not.toContain( 'event: response.created' );
+} );
+
+test( 'Responses completed event carries the final response envelope', () => {
+    const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1234 );
+    const out: string[] = [];
+
+    processChatStreamChunkForResponses(
+        {
+            choices: [
+                {
+                    index: 0,
+                    delta: { content: 'hello' },
+                    finish_reason: 'stop',
+                },
+            ],
+        } as any,
+        state,
+        out,
+    );
+
+    out.length = 0;
+    emitResponsesCompleted( state, out );
+
+    expect( out.join( '' ) ).toContain( 'event: response.completed' );
+    expect( out.join( '' ) ).toContain( '"type":"response.completed"' );
+    expect( out.join( '' ) ).toContain( '"response":' );
+    expect( out.join( '' ) ).toContain( 'hello' );
 } );

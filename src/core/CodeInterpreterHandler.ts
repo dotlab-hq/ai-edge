@@ -205,14 +205,20 @@ export class CodeInterpreterHandler {
 
   private getCandidateModelsForProvider( config: ModelSelectionConfig, requestedModel: string ): string[] {
     const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
-    const isAutoModel = requestedNormalized === AUTO_MODEL_ID;
+    const explicitlyAuto = requestedNormalized === AUTO_MODEL_ID;
+    const modelInThisProvider = config.models.some( m => {
+      const candidate = typeof m === 'string' ? m : ( m as any ).model;
+      return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
+    } );
+    // Unlisted models treated as auto-edge: pick best model from provider.
+    const isAutoModel = explicitlyAuto || !modelInThisProvider;
+
     if ( config.randomRouting === false && !isAutoModel ) {
       return [requestedModel];
     }
 
     const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-    const normalizedModels = modelNames.map( modelName => stripFreeModifier( modelName ).normalizedId );
-    if ( !isAutoModel && normalizedModels.includes( requestedNormalized ) ) {
+    if ( !isAutoModel ) {
       return [requestedModel];
     }
     const uniqueModels: string[] = Array.from( new Set( modelNames ) );

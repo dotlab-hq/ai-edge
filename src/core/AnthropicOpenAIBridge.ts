@@ -288,14 +288,23 @@ export async function relayUpstreamToStreamWriter(
             }
         }
 
+        // ── GUARANTEED: finish the stream if upstream ended without sending message_stop ──
         if ( !state.finished ) {
             finishStreamSync( state, out );
         }
         if ( out.length ) {
             await flushOut( out, streamWriter );
         }
+        console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
     } catch ( error: any ) {
+        console.error( `[anthropic-bridge] stream_error model=${originalModel}: ${error?.message || String( error )}` );
         const errOut: SseOut = [];
+
+        // ── GUARANTEED: finish stream state even on error ──
+        if ( !state.finished ) {
+            finishStreamSync( state, errOut );
+        }
+
         sendErrorEventSync( errOut, error instanceof Error ? error : new Error( String( error ) ) );
         try {
             await flushOut( errOut, streamWriter );

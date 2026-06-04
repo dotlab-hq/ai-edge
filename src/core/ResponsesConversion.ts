@@ -456,6 +456,8 @@ export interface ResponsesStreamState {
     finished: boolean;
     requestStartedAt: number;
     firstEmissionLogged: boolean;
+    textItems: Array<{ itemId: string; text: string }>;
+    toolCalls: Array<{ id: string; name: string; arguments: string }>;
 }
 
 export function createResponsesStreamState( request: ResponsesRequest, requestStartedAt: number ): ResponsesStreamState {
@@ -474,6 +476,8 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         finished: false,
         requestStartedAt,
         firstEmissionLogged: false,
+        textItems: [],
+        toolCalls: [],
     };
 }
 
@@ -481,18 +485,22 @@ export function emitResponsesStreamPreamble( state: ResponsesStreamState, out: s
     if ( state.hasEmittedResponse ) return;
 
     emitResponsesEvent( out, 'response.created', {
-        type: 'response',
-        id: state.responseId,
-        object: 'response',
-        status: 'in_progress',
-        created: state.created,
-        model: state.model,
-        output: [],
+        type: 'response.created',
+        response: {
+            id: state.responseId,
+            object: 'response',
+            status: 'in_progress',
+            created: state.created,
+            model: state.model,
+            output: [],
+        },
     } );
     emitResponsesEvent( out, 'response.in_progress', {
-        type: 'response',
-        id: state.responseId,
-        status: 'in_progress',
+        type: 'response.in_progress',
+        response: {
+            id: state.responseId,
+            status: 'in_progress',
+        },
     } );
     state.hasEmittedResponse = true;
 }
@@ -548,13 +556,16 @@ export function processChatStreamChunkForResponses(
 
         if ( typeof content === 'string' && content.length > 0 ) {
             if ( !state.currentTextBlockOpen ) {
+                // Track text item for cache
+                const itemId = generateId( 'msg' );
+                state.textItems.push( { itemId, text: content } );
                 // Add output item
                 emitResponsesEvent( out, 'response.output_item.added', {
                     type: 'response.output_item.added',
                     output_index: state.currentOutputIndex,
                     item: {
                         type: 'message',
-                        id: generateId( 'msg' ),
+                        id: itemId,
                         role: 'assistant',
                         status: 'in_progress',
                         content: [],
@@ -571,6 +582,10 @@ export function processChatStreamChunkForResponses(
                     },
                 } );
                 state.currentTextBlockOpen = true;
+            } else {
+                // Append to tracked text item
+                const lastText = state.textItems[state.textItems.length - 1];
+                if ( lastText ) lastText.text += content;
             }
 
             emitResponsesEvent( out, 'response.output_text.delta', {
@@ -579,6 +594,27 @@ export function processChatStreamChunkForResponses(
                 content_index: state.contentBlockIndex,
                 delta: content,
             } );
+        }
+
+        // Accumulate tool calls from delta
+        const toolCallDeltas = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+        if ( Array.isArray( toolCallDeltas ) ) {
+            for ( const tcDelta of toolCallDeltas ) {
+                const idx = tcDelta.index as number;
+                if ( typeof idx !== 'number' ) continue;
+
+                // Ensure we have a slot for this tool call
+                while ( state.toolCalls.length <= idx ) {
+                    state.toolCalls.push( { id: '', name: '', arguments: '' } );
+                }
+
+                const existing = state.toolCalls[idx]!;
+                const fnDelta = tcDelta.function as Record<string, unknown> | undefined;
+
+                if ( tcDelta.id ) existing.id = tcDelta.id as string;
+                if ( fnDelta?.name ) existing.name += fnDelta.name as string;
+                if ( fnDelta?.arguments ) existing.arguments += fnDelta.arguments as string;
+            }
         }
     }
 
@@ -636,28 +672,167 @@ function finishResponsesStream( state: ResponsesStreamState, out: string[] ): vo
             output_index: state.currentOutputIndex,
             item: { type: 'message', role: 'assistant', status: 'completed', content: [] },
         } );
+        state.currentOutputIndex++;
+        state.contentBlockIndex = 0;
+        state.currentTextBlockOpen = false;
     }
 
-    emitResponsesEvent( out, 'response.completed', {
-        type: 'response',
-        id: state.responseId,
-        object: 'response',
-        status: 'completed',
-        created: state.created,
-        model: state.model,
-        output: [],
-        usage: {
-            input_tokens: state.inputTokens,
-            input_tokens_details: { cached_tokens: state.cachedInputTokens },
-            output_tokens: state.outputTokens,
-            output_tokens_details: { reasoning_tokens: state.reasoningTokens },
-            total_tokens: state.inputTokens + state.outputTokens,
-        },
-    } );
+    // Emit output_item.done for any accumulated tool calls
+    for ( const tc of state.toolCalls ) {
+        if ( !tc.id ) continue;
+        emitResponsesEvent( out, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: state.currentOutputIndex,
+            item: {
+                type: 'function_call',
+                id: tc.id,
+                call_id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments,
+            },
+        } );
+        state.currentOutputIndex++;
+    }
+
+    // NOTE: response.completed is NOT emitted here. The caller emits it
+    // with the full output list (including tool calls from state.toolCalls).
 }
 
 function emitResponsesEvent( out: string[], eventType: string, data: Record<string, unknown> ): void {
     out.push( `event: ${eventType}\ndata: ${JSON.stringify( data )}\n\n` );
+}
+
+/**
+ * Convert SSE-formatted event strings to plain JSON strings suitable for
+ * WebSocket text frames. Codex's WebSocket client expects plain JSON (no SSE
+ * framing) and parses each text frame as `ResponsesStreamEvent` directly.
+ *
+ * Input:  `event: response.created\ndata: {"type":"response.created",...}\n\n`
+ * Output: `{"type":"response.created",...}`
+ */
+export function sseEventsToWsFrames( sseEvents: string[] ): string[] {
+    const frames: string[] = [];
+    for ( const event of sseEvents ) {
+        // Extract JSON from the `data:` line
+        const dataMatch = event.match( /data: (\{.*\})\n/s );
+        if ( dataMatch?.[1] ) {
+            frames.push( dataMatch[1] );
+        }
+    }
+    return frames;
+}
+
+export function emitResponsesDoneSentinel( out: string[] ): void {
+    out.push( 'data: [DONE]\n\n' );
+}
+
+/**
+ * Build the full output items list from stream state (text items + tool calls)
+ * and emit a single `response.completed` event.
+ */
+export function emitResponsesCompleted( state: ResponsesStreamState, out: string[] ): void {
+    const output: any[] = [];
+
+    // Text output items
+    for ( const ti of state.textItems ) {
+        output.push( {
+            type: 'message',
+            id: ti.itemId,
+            role: 'assistant',
+            status: 'completed',
+            content: ti.text
+                ? [ { type: 'output_text', text: ti.text, annotations: [] } ]
+                : [],
+        } );
+    }
+
+    // Tool call output items
+    for ( const tc of state.toolCalls ) {
+        output.push( {
+            type: 'function_call',
+            id: tc.id,
+            call_id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+        } );
+    }
+
+    // ── Fallback: estimate token counts when upstream didn't provide usage ──
+    // Many non-OpenAI backends do not include `usage` in streaming chunks even
+    // when `stream_options.include_usage` is set.  When all counters are still
+    // at their initial value of 0, derive a rough estimate from the accumulated
+    // content so the client shows meaningful numbers.
+    let inputTokens = state.inputTokens;
+    let outputTokens = state.outputTokens;
+    let cachedInputTokens = state.cachedInputTokens;
+    let reasoningTokens = state.reasoningTokens;
+
+    if ( inputTokens === 0 && outputTokens === 0 ) {
+        // Rough heuristic: ~1 token per 4 characters for English text
+        const outputText = state.textItems.reduce( ( acc, ti ) => acc + ( ti.text ?? '' ), '' );
+        const toolCallText = state.toolCalls.reduce( ( acc, tc ) => acc + ( tc.arguments ?? '' ), '' );
+        outputTokens = Math.max( 1, Math.ceil( ( outputText.length + toolCallText.length ) / 4 ) );
+
+        // We don't have the original request text at this point, so use a
+        // minimal placeholder for input_tokens.  Most Codex turns are short
+        // enough that a small estimate is acceptable; the important thing is
+        // that the total is non-zero so the UI doesn't show "0 tokens".
+        inputTokens = Math.max( 1, Math.ceil( outputTokens * 0.3 ) );
+
+        console.info(
+            `[responses] usage_fallback估算 token counts from content `
+            + `outputTextLen=${outputText.length} toolCallArgLen=${toolCallText.length} `
+            + `estimated_output_tokens=${outputTokens} estimated_input_tokens=${inputTokens}`,
+        );
+    }
+
+    emitResponsesEvent( out, 'response.completed', {
+        type: 'response.completed',
+        response: {
+            id: state.responseId,
+            object: 'response',
+            status: 'completed',
+            created: state.created,
+            model: state.model,
+            output,
+            usage: {
+                input_tokens: inputTokens,
+                input_tokens_details: { cached_tokens: cachedInputTokens },
+                output_tokens: outputTokens,
+                output_tokens_details: { reasoning_tokens: reasoningTokens },
+                total_tokens: inputTokens + outputTokens,
+            },
+        },
+    } );
+}
+
+/**
+ * Build the full output items list from stream state (text items + tool calls).
+ * Used by callers that need the output array for caching without emitting events.
+ */
+export function buildStreamOutputItems( state: ResponsesStreamState ): any[] {
+    const output: any[] = [];
+    for ( const ti of state.textItems ) {
+        output.push( {
+            type: 'message',
+            id: ti.itemId,
+            role: 'assistant',
+            status: 'completed',
+            content: ti.text
+                ? [ { type: 'output_text', text: ti.text, annotations: [] } ]
+                : [],
+        } );
+    }
+    for ( const tc of state.toolCalls ) {
+        output.push( {
+            type: 'function_call',
+            id: tc.id,
+            call_id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+        } );
+    }
+    return output;
 }
 
 // ────────────────────────────────────────────────────────────────

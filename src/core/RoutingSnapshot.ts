@@ -182,7 +182,7 @@ export class RoutingSnapshot {
 
     getProviderPool( requestedModel: string, endpoint: RoutingEndpoint, options: RoutingPoolOptions = {} ): RoutingProviderPool {
         const normalizedRequestedModel = stripFreeModifier( requestedModel ).normalizedId;
-        const isAutoModel = normalizedRequestedModel === AUTO_MODEL_ID;
+        const explicitlyAuto = normalizedRequestedModel === AUTO_MODEL_ID;
         const includeFallback = options.includeFallback !== false;
         const honorRandomRouting = options.honorRandomRouting !== false;
 
@@ -190,6 +190,10 @@ export class RoutingSnapshot {
         const modelLookup = this.providersByEndpointAndModel.get( endpoint );
         const exactProviders = modelLookup?.get( normalizedRequestedModel ) ?? [];
         const exactIds = new Set( exactProviders.map( provider => provider.id ) );
+
+        // Unlisted models are treated as auto-edge.
+        const modelIsListed = exactProviders.length > 0;
+        const isAutoModel = explicitlyAuto || !modelIsListed;
 
         const fallbackProviders: CompiledRoutingProvider[] = [];
         if ( includeFallback || isAutoModel ) {
@@ -232,9 +236,13 @@ export class RoutingSnapshot {
         }
 
         const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
-        const isAutoModel = requestedNormalized === AUTO_MODEL_ID;
+        const explicitlyAuto = requestedNormalized === AUTO_MODEL_ID;
         const honorRandomRouting = options.honorRandomRouting !== false;
         const randomize = options.randomize !== false;
+
+        // Unlisted models are treated as auto-edge.
+        const modelInThisProvider = provider.normalizedModelSet.has( requestedNormalized );
+        const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
         if ( !isAutoModel && honorRandomRouting && provider.randomRouting === false ) {
             return Object.freeze( [requestedModel] );

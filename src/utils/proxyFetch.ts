@@ -3,7 +3,7 @@ import http from 'node:http';
 
 const proxyAgentCache = new Map<string, ProxyAgent>();
 const originAgentCache = new Map<string, Agent>();
-const DEFAULT_TIMEOUT_MS = 45_000;
+const DEFAULT_TIMEOUT_MS = 180_000;        // 3 min (was 45s — too short for large LLM responses)
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 120_000;
 const DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_CONNECTIONS_PER_ORIGIN = 16;
