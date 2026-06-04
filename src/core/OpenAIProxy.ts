@@ -30,11 +30,123 @@ import {
     emitResponsesCompleted,
     emitResponsesDoneSentinel,
 } from './ResponsesConversion';
+import { ThinkingTagParser } from '@/utils/thinkingTagParser';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 const AUTO_MODEL_ID = 'auto';
 const FAST_MODEL_HINTS = ['flash-lite', 'lite', 'mini', 'small', 'fast'];
+
+/**
+ * Parse SSE chunks from an upstream chat completions stream, detect
+ * `` tags in `delta.content`, and rewrite thinking content as
+ * `delta.reasoning` events. Non-content chunks pass through unchanged.
+ *
+ * Buffers incomplete SSE events across calls (events end with `\n\n`).
+ */
+class ThinkingTagSseRewriter {
+    private parser = new ThinkingTagParser();
+    private buffer = '';
+
+    write( rawSse: string ): string {
+        this.buffer += rawSse;
+        const parts = this.buffer.split( '\n\n' );
+        // The last element is the incomplete tail — keep it buffered
+        this.buffer = parts.pop() ?? '';
+        const out: string[] = [];
+
+        for ( const event of parts ) {
+            if ( !event.trim() ) continue;
+
+            const dataMatch = event.match( /^(data:\s*)(.*)$/s );
+            if ( !dataMatch?.[1] || dataMatch?.[2] === undefined ) {
+                out.push( event );
+                continue;
+            }
+
+            const prefix = dataMatch[1];
+            const jsonStr = dataMatch[2].trim();
+            if ( jsonStr === '[DONE]' ) {
+                this.flushRemaining( prefix, out );
+                out.push( event );
+                continue;
+            }
+
+            try {
+                const obj = JSON.parse( jsonStr );
+                const choice = obj.choices?.[0];
+
+                if ( choice?.delta?.content ) {
+                    const segments = this.parser.process( choice.delta.content );
+                    for ( const seg of segments ) {
+                        if ( seg.type === 'thinking' ) {
+                            out.push( `${prefix}${JSON.stringify( { ...obj, choices: [{ ...obj.choices[0], delta: { ...obj.choices[0].delta, content: undefined, reasoning: seg.content } }] } )}` );
+                        } else {
+                            out.push( `${prefix}${JSON.stringify( { ...obj, choices: [{ ...obj.choices[0], delta: { ...obj.choices[0].delta, reasoning: undefined } }] } )}` );
+                        }
+                    }
+                } else if ( choice?.finish_reason ) {
+                    this.flushRemaining( prefix, out );
+                    out.push( event );
+                } else {
+                    out.push( event );
+                }
+            } catch {
+                out.push( event );
+            }
+        }
+
+        return out.join( '\n\n' );
+    }
+
+    flush(): string {
+        const out: string[] = [];
+        // Process any remaining buffered content as a final event
+        if ( this.buffer.trim() ) {
+            const dataMatch = this.buffer.match( /^(data:\s*)(.*)$/s );
+            if ( dataMatch?.[1] && dataMatch?.[2] !== undefined ) {
+                const prefix = dataMatch[1];
+                const jsonStr = dataMatch[2].trim();
+                if ( jsonStr !== '[DONE]' ) {
+                    try {
+                        const obj = JSON.parse( jsonStr );
+                        const choice = obj.choices?.[0];
+                        if ( choice?.delta?.content ) {
+                            const segments = this.parser.process( choice.delta.content );
+                            for ( const seg of segments ) {
+                                if ( seg.type === 'thinking' ) {
+                                    out.push( `${prefix}${JSON.stringify( { ...obj, choices: [{ ...obj.choices[0], delta: { ...obj.choices[0].delta, content: undefined, reasoning: seg.content } }] } )}` );
+                                } else {
+                                    out.push( `${prefix}${JSON.stringify( { ...obj, choices: [{ ...obj.choices[0], delta: { ...obj.choices[0].delta, reasoning: undefined } }] } )}` );
+                                }
+                            }
+                        } else {
+                            out.push( this.buffer );
+                        }
+                    } catch {
+                        out.push( this.buffer );
+                    }
+                } else {
+                    this.flushRemaining( prefix, out );
+                    out.push( this.buffer );
+                }
+            } else {
+                out.push( this.buffer );
+            }
+            this.buffer = '';
+        }
+        // Flush any remaining parser content
+        this.flushRemaining( 'data: ', out );
+        return out.join( '\n\n' );
+    }
+
+    private flushRemaining( prefix: string, out: string[] ): void {
+        const flushed = this.parser.flush();
+        for ( const seg of flushed ) {
+            out.push( `${prefix}${JSON.stringify( { choices: [{ delta: seg.type === 'thinking' ? { reasoning: seg.content } : { content: seg.content } }] } )}` );
+        }
+    }
+}
 
 export class OpenAIProxy {
     private app: Hono;
@@ -1123,6 +1235,7 @@ export class OpenAIProxy {
                                     ( chunk ) => streamWriter.write( chunk ),
                                     { isClientConnected: () => !clientDisconnected }
                                 );
+                                const thinkingRewriter = new ThinkingTagSseRewriter();
 
                                 const clientSignal = c.req.raw.signal;
                                 const onClientAbort = () => {
@@ -1140,9 +1253,12 @@ export class OpenAIProxy {
                                             console.info( `[${endpoint}] stream_first_chunk provider=${config.id} model=${selectedModel} firstByteMs=${Date.now() - upstreamResponseReceivedAt}` );
                                         }
                                         if ( value ) {
-                                            const chunk = decoder.decode( value, { stream: true } );
-                                            if ( chunk ) {
-                                                await streamWriter.write( chunk );
+                                            const raw = decoder.decode( value, { stream: true } );
+                                            if ( raw ) {
+                                                const rewritten = thinkingRewriter.write( raw );
+                                                if ( rewritten ) {
+                                                    await streamWriter.write( rewritten );
+                                                }
                                                 heartbeat.kick();
                                             }
                                         }
@@ -1151,7 +1267,15 @@ export class OpenAIProxy {
                                     if ( !clientDisconnected ) {
                                         const tail = decoder.decode();
                                         if ( tail ) {
-                                            await streamWriter.write( tail );
+                                            const rewritten = thinkingRewriter.write( tail );
+                                            if ( rewritten ) {
+                                                await streamWriter.write( rewritten );
+                                            }
+                                        }
+                                        // Flush any remaining parser state
+                                        const finalFlush = thinkingRewriter.flush();
+                                        if ( finalFlush ) {
+                                            await streamWriter.write( finalFlush );
                                         }
                                     }
 

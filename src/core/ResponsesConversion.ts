@@ -6,6 +6,8 @@
  * the upstream response in Responses shape so the caller never notices.
  */
 
+import { ThinkingTagParser } from '@/utils/thinkingTagParser';
+
 // ────────────────────────────────────────────────────────────────
 // Types (minimal, only what the converters reference)
 // ────────────────────────────────────────────────────────────────
@@ -449,6 +451,8 @@ export interface ResponsesStreamState {
     currentOutputIndex: number;
     hasEmittedResponse: boolean;
     currentTextBlockOpen: boolean;
+    currentReasoningBlockOpen: boolean;
+    currentReasoningItemId: string;
     inputTokens: number;
     outputTokens: number;
     cachedInputTokens: number;
@@ -457,7 +461,9 @@ export interface ResponsesStreamState {
     requestStartedAt: number;
     firstEmissionLogged: boolean;
     textItems: Array<{ itemId: string; text: string }>;
+    reasoningItems: Array<{ itemId: string; text: string }>;
     toolCalls: Array<{ id: string; name: string; arguments: string }>;
+    thinkingTagParser: ThinkingTagParser;
 }
 
 export function createResponsesStreamState( request: ResponsesRequest, requestStartedAt: number ): ResponsesStreamState {
@@ -469,6 +475,8 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         currentOutputIndex: 0,
         hasEmittedResponse: false,
         currentTextBlockOpen: false,
+        currentReasoningBlockOpen: false,
+        currentReasoningItemId: '',
         inputTokens: 0,
         outputTokens: 0,
         cachedInputTokens: 0,
@@ -477,7 +485,9 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         requestStartedAt,
         firstEmissionLogged: false,
         textItems: [],
+        reasoningItems: [],
         toolCalls: [],
+        thinkingTagParser: new ThinkingTagParser(),
     };
 }
 
@@ -555,45 +565,118 @@ export function processChatStreamChunkForResponses(
         const content = delta.content as string | undefined;
 
         if ( typeof content === 'string' && content.length > 0 ) {
-            if ( !state.currentTextBlockOpen ) {
-                // Track text item for cache
-                const itemId = generateId( 'msg' );
-                state.textItems.push( { itemId, text: content } );
-                // Add output item
-                emitResponsesEvent( out, 'response.output_item.added', {
-                    type: 'response.output_item.added',
-                    output_index: state.currentOutputIndex,
-                    item: {
-                        type: 'message',
-                        id: itemId,
-                        role: 'assistant',
-                        status: 'in_progress',
-                        content: [],
-                    },
-                } );
-                // Start content block
-                emitResponsesEvent( out, 'response.content_part.added', {
-                    type: 'response.content_part.added',
-                    output_index: state.currentOutputIndex,
-                    content_index: state.contentBlockIndex,
-                    part: {
-                        type: 'output_text',
-                        text: '',
-                    },
-                } );
-                state.currentTextBlockOpen = true;
-            } else {
-                // Append to tracked text item
-                const lastText = state.textItems[state.textItems.length - 1];
-                if ( lastText ) lastText.text += content;
+            const segments = state.thinkingTagParser.process( content );
+            for ( const seg of segments ) {
+                if ( seg.type === 'thinking' ) {
+                    // Close text block if open
+                    if ( state.currentTextBlockOpen ) {
+                        emitResponsesEvent( out, 'response.content_part.done', {
+                            type: 'response.content_part.done',
+                            output_index: state.currentOutputIndex,
+                            content_index: state.contentBlockIndex,
+                            part: {
+                                type: 'output_text',
+                                text: '',
+                            },
+                        } );
+                        emitResponsesEvent( out, 'response.output_item.done', {
+                            type: 'response.output_item.done',
+                            output_index: state.currentOutputIndex,
+                            item: {
+                                type: 'message',
+                                role: 'assistant',
+                                status: 'completed',
+                                content: [],
+                            },
+                        } );
+                        state.currentOutputIndex++;
+                        state.contentBlockIndex = 0;
+                        state.currentTextBlockOpen = false;
+                    }
+                    // Open reasoning block if not already open
+                    if ( !state.currentReasoningBlockOpen ) {
+                        const itemId = generateId( 'msg' );
+                        state.currentReasoningItemId = itemId;
+                        state.reasoningItems.push( { itemId, text: seg.content } );
+                        emitResponsesEvent( out, 'response.output_item.added', {
+                            type: 'response.output_item.added',
+                            output_index: state.currentOutputIndex,
+                            item: {
+                                type: 'reasoning',
+                                id: itemId,
+                                summary: [],
+                            },
+                        } );
+                        state.currentReasoningBlockOpen = true;
+                    } else {
+                        // Append to current reasoning item
+                        const lastReasoning = state.reasoningItems[state.reasoningItems.length - 1];
+                        if ( lastReasoning ) lastReasoning.text += seg.content;
+                    }
+                    emitResponsesEvent( out, 'response.reasoning_summary_text.delta', {
+                        type: 'response.reasoning_summary_text.delta',
+                        output_index: state.currentOutputIndex,
+                        delta: seg.content,
+                    } );
+                } else {
+                    // Close reasoning block if open
+                    if ( state.currentReasoningBlockOpen ) {
+                        emitResponsesEvent( out, 'response.reasoning_summary_text.done', {
+                            type: 'response.reasoning_summary_text.done',
+                            output_index: state.currentOutputIndex,
+                        } );
+                        emitResponsesEvent( out, 'response.output_item.done', {
+                            type: 'response.output_item.done',
+                            output_index: state.currentOutputIndex,
+                            item: {
+                                type: 'reasoning',
+                                id: state.currentReasoningItemId,
+                                summary: [],
+                            },
+                        } );
+                        state.currentOutputIndex++;
+                        state.contentBlockIndex = 0;
+                        state.currentReasoningBlockOpen = false;
+                        state.currentReasoningItemId = '';
+                    }
+                    // Open text block if not already open
+                    if ( !state.currentTextBlockOpen ) {
+                        const itemId = generateId( 'msg' );
+                        state.textItems.push( { itemId, text: seg.content } );
+                        emitResponsesEvent( out, 'response.output_item.added', {
+                            type: 'response.output_item.added',
+                            output_index: state.currentOutputIndex,
+                            item: {
+                                type: 'message',
+                                id: itemId,
+                                role: 'assistant',
+                                status: 'in_progress',
+                                content: [],
+                            },
+                        } );
+                        emitResponsesEvent( out, 'response.content_part.added', {
+                            type: 'response.content_part.added',
+                            output_index: state.currentOutputIndex,
+                            content_index: state.contentBlockIndex,
+                            part: {
+                                type: 'output_text',
+                                text: '',
+                            },
+                        } );
+                        state.currentTextBlockOpen = true;
+                    } else {
+                        // Append to tracked text item
+                        const lastText = state.textItems[state.textItems.length - 1];
+                        if ( lastText ) lastText.text += seg.content;
+                    }
+                    emitResponsesEvent( out, 'response.output_text.delta', {
+                        type: 'response.output_text.delta',
+                        output_index: state.currentOutputIndex,
+                        content_index: state.contentBlockIndex,
+                        delta: seg.content,
+                    } );
+                }
             }
-
-            emitResponsesEvent( out, 'response.output_text.delta', {
-                type: 'response.output_text.delta',
-                output_index: state.currentOutputIndex,
-                content_index: state.contentBlockIndex,
-                delta: content,
-            } );
         }
 
         // Accumulate tool calls from delta
@@ -622,6 +705,106 @@ export function processChatStreamChunkForResponses(
     // because some providers send finish_reason in a separate chunk
     // without any content delta.
     if ( finishReason && finishReason !== 'null' ) {
+        // Flush any remaining thinking tag content
+        const flushedSegments = state.thinkingTagParser.flush();
+        for ( const seg of flushedSegments ) {
+            if ( seg.type === 'thinking' ) {
+                if ( state.currentTextBlockOpen ) {
+                    emitResponsesEvent( out, 'response.content_part.done', {
+                        type: 'response.content_part.done',
+                        output_index: state.currentOutputIndex,
+                        content_index: state.contentBlockIndex,
+                        part: { type: 'output_text', text: '' },
+                    } );
+                    emitResponsesEvent( out, 'response.output_item.done', {
+                        type: 'response.output_item.done',
+                        output_index: state.currentOutputIndex,
+                        item: { type: 'message', role: 'assistant', status: 'completed', content: [] },
+                    } );
+                    state.currentOutputIndex++;
+                    state.contentBlockIndex = 0;
+                    state.currentTextBlockOpen = false;
+                }
+                if ( !state.currentReasoningBlockOpen ) {
+                    const itemId = generateId( 'msg' );
+                    state.currentReasoningItemId = itemId;
+                    state.reasoningItems.push( { itemId, text: seg.content } );
+                    emitResponsesEvent( out, 'response.output_item.added', {
+                        type: 'response.output_item.added',
+                        output_index: state.currentOutputIndex,
+                        item: { type: 'reasoning', id: itemId, summary: [] },
+                    } );
+                    state.currentReasoningBlockOpen = true;
+                } else {
+                    const lastReasoning = state.reasoningItems[state.reasoningItems.length - 1];
+                    if ( lastReasoning ) lastReasoning.text += seg.content;
+                }
+                emitResponsesEvent( out, 'response.reasoning_summary_text.delta', {
+                    type: 'response.reasoning_summary_text.delta',
+                    output_index: state.currentOutputIndex,
+                    delta: seg.content,
+                } );
+            } else {
+                if ( state.currentReasoningBlockOpen ) {
+                    emitResponsesEvent( out, 'response.reasoning_summary_text.done', {
+                        type: 'response.reasoning_summary_text.done',
+                        output_index: state.currentOutputIndex,
+                    } );
+                    emitResponsesEvent( out, 'response.output_item.done', {
+                        type: 'response.output_item.done',
+                        output_index: state.currentOutputIndex,
+                        item: { type: 'reasoning', id: state.currentReasoningItemId, summary: [] },
+                    } );
+                    state.currentOutputIndex++;
+                    state.contentBlockIndex = 0;
+                    state.currentReasoningBlockOpen = false;
+                    state.currentReasoningItemId = '';
+                }
+                if ( !state.currentTextBlockOpen ) {
+                    const itemId = generateId( 'msg' );
+                    state.textItems.push( { itemId, text: seg.content } );
+                    emitResponsesEvent( out, 'response.output_item.added', {
+                        type: 'response.output_item.added',
+                        output_index: state.currentOutputIndex,
+                        item: { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [] },
+                    } );
+                    emitResponsesEvent( out, 'response.content_part.added', {
+                        type: 'response.content_part.added',
+                        output_index: state.currentOutputIndex,
+                        content_index: state.contentBlockIndex,
+                        part: { type: 'output_text', text: '' },
+                    } );
+                    state.currentTextBlockOpen = true;
+                } else {
+                    const lastText = state.textItems[state.textItems.length - 1];
+                    if ( lastText ) lastText.text += seg.content;
+                }
+                emitResponsesEvent( out, 'response.output_text.delta', {
+                    type: 'response.output_text.delta',
+                    output_index: state.currentOutputIndex,
+                    content_index: state.contentBlockIndex,
+                    delta: seg.content,
+                } );
+            }
+        }
+
+        // Close reasoning block if still open
+        if ( state.currentReasoningBlockOpen ) {
+            emitResponsesEvent( out, 'response.reasoning_summary_text.done', {
+                type: 'response.reasoning_summary_text.done',
+                output_index: state.currentOutputIndex,
+            } );
+            emitResponsesEvent( out, 'response.output_item.done', {
+                type: 'response.output_item.done',
+                output_index: state.currentOutputIndex,
+                item: { type: 'reasoning', id: state.currentReasoningItemId, summary: [] },
+            } );
+            state.currentOutputIndex++;
+            state.contentBlockIndex = 0;
+            state.currentReasoningBlockOpen = false;
+            state.currentReasoningItemId = '';
+        }
+
         // Close text block if open
         if ( state.currentTextBlockOpen ) {
             emitResponsesEvent( out, 'response.content_part.done', {
@@ -658,6 +841,106 @@ export function processChatStreamChunkForResponses(
 function finishResponsesStream( state: ResponsesStreamState, out: string[] ): void {
     if ( state.finished ) return;
     state.finished = true;
+
+    // Flush any remaining thinking tag content
+    const flushedSegments = state.thinkingTagParser.flush();
+    for ( const seg of flushedSegments ) {
+        if ( seg.type === 'thinking' ) {
+            if ( state.currentTextBlockOpen ) {
+                emitResponsesEvent( out, 'response.content_part.done', {
+                    type: 'response.content_part.done',
+                    output_index: state.currentOutputIndex,
+                    content_index: state.contentBlockIndex,
+                    part: { type: 'output_text', text: '' },
+                } );
+                emitResponsesEvent( out, 'response.output_item.done', {
+                    type: 'response.output_item.done',
+                    output_index: state.currentOutputIndex,
+                    item: { type: 'message', role: 'assistant', status: 'completed', content: [] },
+                } );
+                state.currentOutputIndex++;
+                state.contentBlockIndex = 0;
+                state.currentTextBlockOpen = false;
+            }
+            if ( !state.currentReasoningBlockOpen ) {
+                const itemId = generateId( 'msg' );
+                state.currentReasoningItemId = itemId;
+                state.reasoningItems.push( { itemId, text: seg.content } );
+                emitResponsesEvent( out, 'response.output_item.added', {
+                    type: 'response.output_item.added',
+                    output_index: state.currentOutputIndex,
+                    item: { type: 'reasoning', id: itemId, summary: [] },
+                } );
+                state.currentReasoningBlockOpen = true;
+            } else {
+                const lastReasoning = state.reasoningItems[state.reasoningItems.length - 1];
+                if ( lastReasoning ) lastReasoning.text += seg.content;
+            }
+            emitResponsesEvent( out, 'response.reasoning_summary_text.delta', {
+                type: 'response.reasoning_summary_text.delta',
+                output_index: state.currentOutputIndex,
+                delta: seg.content,
+            } );
+        } else {
+            if ( state.currentReasoningBlockOpen ) {
+                emitResponsesEvent( out, 'response.reasoning_summary_text.done', {
+                    type: 'response.reasoning_summary_text.done',
+                    output_index: state.currentOutputIndex,
+                } );
+                emitResponsesEvent( out, 'response.output_item.done', {
+                    type: 'response.output_item.done',
+                    output_index: state.currentOutputIndex,
+                    item: { type: 'reasoning', id: state.currentReasoningItemId, summary: [] },
+                } );
+                state.currentOutputIndex++;
+                state.contentBlockIndex = 0;
+                state.currentReasoningBlockOpen = false;
+                state.currentReasoningItemId = '';
+            }
+            if ( !state.currentTextBlockOpen ) {
+                const itemId = generateId( 'msg' );
+                state.textItems.push( { itemId, text: seg.content } );
+                emitResponsesEvent( out, 'response.output_item.added', {
+                    type: 'response.output_item.added',
+                    output_index: state.currentOutputIndex,
+                    item: { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [] },
+                } );
+                emitResponsesEvent( out, 'response.content_part.added', {
+                    type: 'response.content_part.added',
+                    output_index: state.currentOutputIndex,
+                    content_index: state.contentBlockIndex,
+                    part: { type: 'output_text', text: '' },
+                } );
+                state.currentTextBlockOpen = true;
+            } else {
+                const lastText = state.textItems[state.textItems.length - 1];
+                if ( lastText ) lastText.text += seg.content;
+            }
+            emitResponsesEvent( out, 'response.output_text.delta', {
+                type: 'response.output_text.delta',
+                output_index: state.currentOutputIndex,
+                content_index: state.contentBlockIndex,
+                delta: seg.content,
+            } );
+        }
+    }
+
+    // Close lingering reasoning block
+    if ( state.currentReasoningBlockOpen ) {
+        emitResponsesEvent( out, 'response.reasoning_summary_text.done', {
+            type: 'response.reasoning_summary_text.done',
+            output_index: state.currentOutputIndex,
+        } );
+        emitResponsesEvent( out, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: state.currentOutputIndex,
+            item: { type: 'reasoning', id: state.currentReasoningItemId, summary: [] },
+        } );
+        state.currentOutputIndex++;
+        state.contentBlockIndex = 0;
+        state.currentReasoningBlockOpen = false;
+        state.currentReasoningItemId = '';
+    }
 
     // Close any lingering text block
     if ( state.currentTextBlockOpen ) {

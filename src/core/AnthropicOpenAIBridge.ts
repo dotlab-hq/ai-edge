@@ -10,6 +10,7 @@ import {
     type OpenAIChatResponse,
     type OpenAIStreamChunk,
 } from '@/package/claude-adapter';
+import { ThinkingTagParser } from '@/utils/thinkingTagParser';
 
 type StreamWriter = {
     write: ( chunk: string ) => Promise<unknown>;
@@ -49,6 +50,7 @@ interface StreamState {
     finished: boolean;
     streamStartedAt: number;
     firstSseEmissionLogged: boolean;
+    thinkingTagParser: ThinkingTagParser;
 }
 
 let toolIdCounter = 0;
@@ -347,6 +349,7 @@ function createStreamState( originalModel: string, initialContentBlocks: Array<R
         finished: false,
         streamStartedAt: requestStartedAt,
         firstSseEmissionLogged: false,
+        thinkingTagParser: new ThinkingTagParser(),
     };
 }
 
@@ -443,29 +446,49 @@ function processOpenAIChunkSync( chunk: OpenAIStreamChunk, state: StreamState, o
     }
 
     if ( delta.content ) {
-        if ( state.reasoningBlockOpen ) {
-            const signature = getOrCreateThinkingSignature( state );
-            sendSignatureDeltaSync( state, state.contentBlockIndex, signature, out );
-            sendContentBlockStopSync( state, state.contentBlockIndex, out );
-            state.reasoningBlockOpen = false;
-            state.reasoningEmittedEnd = true;
-            state.contentBlockIndex++;
-        }
-
-        const existingType = state.openBlockTypes.get( state.contentBlockIndex );
-        if ( !state.textBlockOpen || ( existingType && existingType !== 'text' ) ) {
-            if ( state.textBlockOpen && existingType && existingType !== 'text' ) {
-                sendContentBlockStopSync( state, state.contentBlockIndex, out );
-                state.textBlockOpen = false;
-                state.textContent = '';
-                state.contentBlockIndex++;
+        const segments = state.thinkingTagParser.process( delta.content );
+        for ( const seg of segments ) {
+            if ( seg.type === 'thinking' ) {
+                // Close text block if open
+                if ( state.textBlockOpen ) {
+                    sendContentBlockStopSync( state, state.contentBlockIndex, out );
+                    state.textBlockOpen = false;
+                    state.textContent = '';
+                    state.contentBlockIndex++;
+                }
+                // Open thinking block if not already open
+                if ( !state.reasoningBlockOpen ) {
+                    sendThinkingBlockStartSync( state, state.contentBlockIndex, out );
+                    state.reasoningBlockOpen = true;
+                    state.reasoningEmittedStart = true;
+                }
+                sendThinkingDeltaSync( state, state.contentBlockIndex, seg.content, out );
+            } else {
+                // Close reasoning block if open
+                if ( state.reasoningBlockOpen ) {
+                    const signature = getOrCreateThinkingSignature( state );
+                    sendSignatureDeltaSync( state, state.contentBlockIndex, signature, out );
+                    sendContentBlockStopSync( state, state.contentBlockIndex, out );
+                    state.reasoningBlockOpen = false;
+                    state.reasoningEmittedEnd = true;
+                    state.contentBlockIndex++;
+                }
+                // Open text block if not already open
+                const existingType = state.openBlockTypes.get( state.contentBlockIndex );
+                if ( !state.textBlockOpen || ( existingType && existingType !== 'text' ) ) {
+                    if ( state.textBlockOpen && existingType && existingType !== 'text' ) {
+                        sendContentBlockStopSync( state, state.contentBlockIndex, out );
+                        state.textBlockOpen = false;
+                        state.textContent = '';
+                        state.contentBlockIndex++;
+                    }
+                    sendContentBlockStartSync( state, state.contentBlockIndex, 'text', '', out );
+                    state.textBlockOpen = true;
+                }
+                state.textContent += seg.content;
+                sendTextDeltaSync( state, state.contentBlockIndex, seg.content, out );
             }
-            sendContentBlockStartSync( state, state.contentBlockIndex, 'text', '', out );
-            state.textBlockOpen = true;
         }
-
-        state.textContent += delta.content;
-        sendTextDeltaSync( state, state.contentBlockIndex, delta.content, out );
     }
 
     if ( delta.tool_calls ) {
@@ -476,6 +499,40 @@ function processOpenAIChunkSync( chunk: OpenAIStreamChunk, state: StreamState, o
 
     if ( choice.finish_reason ) {
         state.lastFinishReason = choice.finish_reason;
+
+        // Flush any remaining buffered thinking tag content
+        const flushedSegments = state.thinkingTagParser.flush();
+        for ( const seg of flushedSegments ) {
+            if ( seg.type === 'thinking' ) {
+                if ( state.textBlockOpen ) {
+                    sendContentBlockStopSync( state, state.contentBlockIndex, out );
+                    state.textBlockOpen = false;
+                    state.textContent = '';
+                    state.contentBlockIndex++;
+                }
+                if ( !state.reasoningBlockOpen ) {
+                    sendThinkingBlockStartSync( state, state.contentBlockIndex, out );
+                    state.reasoningBlockOpen = true;
+                    state.reasoningEmittedStart = true;
+                }
+                sendThinkingDeltaSync( state, state.contentBlockIndex, seg.content, out );
+            } else {
+                if ( state.reasoningBlockOpen ) {
+                    const signature = getOrCreateThinkingSignature( state );
+                    sendSignatureDeltaSync( state, state.contentBlockIndex, signature, out );
+                    sendContentBlockStopSync( state, state.contentBlockIndex, out );
+                    state.reasoningBlockOpen = false;
+                    state.reasoningEmittedEnd = true;
+                    state.contentBlockIndex++;
+                }
+                if ( !state.textBlockOpen ) {
+                    sendContentBlockStartSync( state, state.contentBlockIndex, 'text', '', out );
+                    state.textBlockOpen = true;
+                }
+                state.textContent += seg.content;
+                sendTextDeltaSync( state, state.contentBlockIndex, seg.content, out );
+            }
+        }
 
         if ( state.reasoningBlockOpen ) {
             const signature = getOrCreateThinkingSignature( state );
