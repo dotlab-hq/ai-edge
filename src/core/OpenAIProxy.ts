@@ -1370,14 +1370,8 @@ export class OpenAIProxy {
         };
         clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
-        let heartbeat: ReturnType<typeof startStreamHeartbeat> | null = null;
-
         const stream = new ReadableStream( {
             start( controller ) {
-                heartbeat = startStreamHeartbeat(
-                    ( chunk ) => { try { controller.enqueue( encoder.encode( chunk ) ); } catch { /* ignore */ } },
-                    { isClientConnected: () => !clientDisconnected }
-                );
 
                 const processChunk = ( sseBuffer: string ): string => {
                     const out: string[] = [];
@@ -1417,7 +1411,6 @@ export class OpenAIProxy {
                             }
 
                             sseBuffer = processChunk( sseBuffer );
-                            heartbeat?.kick();
 
                             if ( responsesState.finished ) break;
                         }
@@ -1458,7 +1451,6 @@ export class OpenAIProxy {
                                 if ( out.length ) controller.enqueue( encoder.encode( out.join( '' ) ) );
                             } catch { /* stream may already be errored */ }
                         }
-                        heartbeat?.stop();
                         clientSignal.removeEventListener( 'abort', onClientAbort );
                         try { upstreamReader.releaseLock(); } catch { /* ignore */ }
                         controller.close();

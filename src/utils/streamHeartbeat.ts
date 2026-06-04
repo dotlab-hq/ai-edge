@@ -9,7 +9,7 @@ export interface StreamHeartbeat {
     stop: () => void;
 }
 
-const DEFAULT_INTERVAL_MS = 100;
+const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_COMMENT = ': keepalive\n\n';
 
 export function startStreamHeartbeat(

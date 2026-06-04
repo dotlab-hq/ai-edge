@@ -233,7 +233,6 @@ export class AnthropicProxy {
             c.header( 'Connection', 'keep-alive' );
             c.header( 'X-Accel-Buffering', 'no' );
             return stream( c, async ( streamWriter ) => {
-              await streamWriter.write( ': keepalive\n\n' );
               await relayUpstreamToStreamWriter(
                 c,
                 response,

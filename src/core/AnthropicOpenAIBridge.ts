@@ -1,7 +1,6 @@
 import type { Context } from 'hono';
 import { randomBytes } from 'crypto';
 import { stream } from 'hono/streaming';
-import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 import {
     convertRequestToOpenAI,
     convertResponseToAnthropic,
@@ -97,11 +96,6 @@ export async function streamOpenAIResponseAsAnthropic(
         let bufferLength = 0;
         let firstUpstreamChunkLogged = false;
         let clientDisconnected = false;
-        const heartbeat = startStreamHeartbeat(
-            ( chunk ) => streamWriter.write( chunk ),
-            { isClientConnected: () => !clientDisconnected }
-        );
-
         const clientSignal = c.req.raw.signal;
         const onClientAbort = () => {
             clientDisconnected = true;
@@ -111,7 +105,7 @@ export async function streamOpenAIResponseAsAnthropic(
 
         try {
             const initialOut: SseOut = [': stream-start\n\n'];
-            await flushOut( initialOut, streamWriter, heartbeat );
+            await flushOut( initialOut, streamWriter );
 
             while ( !clientDisconnected ) {
                 const { done, value } = await reader.read();
@@ -142,14 +136,14 @@ export async function streamOpenAIResponseAsAnthropic(
                 for ( const eventBlock of events ) {
                     const finished = processSseBlockSync( eventBlock, state, out );
                     if ( finished ) {
-                        await flushOut( out, streamWriter, heartbeat );
+                        await flushOut( out, streamWriter );
                         console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
                         reader.releaseLock();
                         return;
                     }
                 }
                 if ( out.length ) {
-                    await flushOut( out, streamWriter, heartbeat );
+                    await flushOut( out, streamWriter );
                 }
             }
 
@@ -163,7 +157,7 @@ export async function streamOpenAIResponseAsAnthropic(
             for ( const eventBlock of events ) {
                 const finished = processSseBlockSync( eventBlock, state, out );
                 if ( finished ) {
-                    await flushOut( out, streamWriter, heartbeat );
+                    await flushOut( out, streamWriter );
                     console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
                     reader.releaseLock();
                     return;
@@ -174,18 +168,17 @@ export async function streamOpenAIResponseAsAnthropic(
                 finishStreamSync( state, out );
             }
             if ( out.length ) {
-                await flushOut( out, streamWriter, heartbeat );
+                await flushOut( out, streamWriter );
             }
         } catch ( error: any ) {
             const errOut: SseOut = [];
             sendErrorEventSync( errOut, error instanceof Error ? error : new Error( String( error ) ) );
             try {
-                await flushOut( errOut, streamWriter, heartbeat );
+                await flushOut( errOut, streamWriter );
             } catch {
                 /* ignore secondary error */
             }
         } finally {
-            heartbeat.stop();
             clientSignal.removeEventListener( 'abort', onClientAbort );
             if ( !clientDisconnected ) {
                 console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
@@ -229,10 +222,6 @@ export async function relayUpstreamToStreamWriter(
     let bufferLength = 0;
     let firstUpstreamChunkLogged = false;
     let clientDisconnected = false;
-    const heartbeat = startStreamHeartbeat(
-        ( chunk ) => streamWriter.write( chunk ),
-        { isClientConnected: () => !clientDisconnected }
-    );
 
     const clientSignal = c.req.raw.signal;
     const onClientAbort = () => {
@@ -271,14 +260,14 @@ export async function relayUpstreamToStreamWriter(
             for ( const eventBlock of events ) {
                 const finished = processSseBlockSync( eventBlock, state, out );
                 if ( finished ) {
-                    await flushOut( out, streamWriter, heartbeat );
+                    await flushOut( out, streamWriter );
                     console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
                     reader.releaseLock();
                     return;
                 }
             }
             if ( out.length ) {
-                await flushOut( out, streamWriter, heartbeat );
+                await flushOut( out, streamWriter );
             }
         }
 
@@ -292,7 +281,7 @@ export async function relayUpstreamToStreamWriter(
         for ( const eventBlock of events ) {
             const finished = processSseBlockSync( eventBlock, state, out );
             if ( finished ) {
-                await flushOut( out, streamWriter, heartbeat );
+                await flushOut( out, streamWriter );
                 console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );
                 reader.releaseLock();
                 return;
@@ -303,18 +292,17 @@ export async function relayUpstreamToStreamWriter(
             finishStreamSync( state, out );
         }
         if ( out.length ) {
-            await flushOut( out, streamWriter, heartbeat );
+            await flushOut( out, streamWriter );
         }
     } catch ( error: any ) {
         const errOut: SseOut = [];
         sendErrorEventSync( errOut, error instanceof Error ? error : new Error( String( error ) ) );
         try {
-            await flushOut( errOut, streamWriter, heartbeat );
+            await flushOut( errOut, streamWriter );
         } catch {
             /* ignore secondary error */
         }
     } finally {
-        heartbeat.stop();
         clientSignal.removeEventListener( 'abort', onClientAbort );
         if ( !clientDisconnected ) {
             console.info( `[anthropic-bridge] stream_complete model=${originalModel} totalMs=${Date.now() - requestStartedAt}` );

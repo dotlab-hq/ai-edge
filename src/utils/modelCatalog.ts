@@ -41,11 +41,19 @@ export type UnifiedModelCatalogEntry = {
     };
     context_length: number;
     supported_parameters: string[];
+    modalities: {
+        input: string[];
+        output: string[];
+    };
     capabilities: {
+        vision: boolean;
+        image_input: boolean;
         reasoning: boolean;
         thinking: boolean;
         reasoning_levels: Array<Exclude<ReasoningEffort, 'none'>>;
     };
+    supports_vision: boolean;
+    supports_images: boolean;
     supports_reasoning: boolean;
     reasoning: boolean;
     reasoning_effort: boolean;
@@ -102,12 +110,12 @@ function isModelObject( modelEntry: ConfigModelEntry | undefined ): modelEntry i
     return typeof modelEntry === 'object' && modelEntry !== null;
 }
 
-function hasReasoningConfigured(value: { reasoning_efforts?: ReasoningEffort[]; default_reasoning?: ReasoningEffort }): boolean {
-    return Object.prototype.hasOwnProperty.call(value, 'reasoning_efforts')
-        || Object.prototype.hasOwnProperty.call(value, 'default_reasoning');
+function hasReasoningConfigured( value: { reasoning_efforts?: ReasoningEffort[]; default_reasoning?: ReasoningEffort } ): boolean {
+    return Object.prototype.hasOwnProperty.call( value, 'reasoning_efforts' )
+        || Object.prototype.hasOwnProperty.call( value, 'default_reasoning' );
 }
 
-function getReasoningConfig(config: ProviderConfig, modelEntry?: ConfigModelEntry): { efforts: ReasoningEffort[]; defaultReasoning?: ReasoningEffort } {
+function getReasoningConfig( config: ProviderConfig, modelEntry?: ConfigModelEntry ): { efforts: ReasoningEffort[]; defaultReasoning?: ReasoningEffort } {
     const source = isModelObject( modelEntry ) && ( modelEntry.reasoning_efforts || modelEntry.default_reasoning )
         ? modelEntry
         : config;
@@ -321,6 +329,7 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
 
             const inputModalities = config.modalities?.input ?? normalized.inputModalities;
             const outputModalities = config.modalities?.output ?? normalized.outputModalities;
+            const hasVision = inputModalities.includes( 'image' );
 
             const entry: UnifiedModelCatalogEntry = {
                 id: configMeta.id,
@@ -350,11 +359,19 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                         ? normalized.limit.input
                         : 0,
                 supported_parameters: Array.from( supportedParameters ),
+                modalities: {
+                    input: inputModalities,
+                    output: outputModalities,
+                },
                 capabilities: {
+                    vision: hasVision,
+                    image_input: hasVision,
                     reasoning: reasoningSupported,
                     thinking: reasoningSupported,
                     reasoning_levels: getReasoningLevels( configMeta.reasoningEfforts ),
                 },
+                supports_vision: hasVision,
+                supports_images: hasVision,
                 supports_reasoning: reasoningSupported,
                 reasoning: reasoningSupported,
                 reasoning_effort: reasoningSupported,
@@ -394,7 +411,7 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
             created: MODEL_CREATED_AT,
             owned_by: 'ai-edge',
             architecture: {
-                input_modalities: ['text'],
+                input_modalities: ['text', 'image', 'audio', 'file'],
                 output_modalities: ['text'],
                 tokenizer: 'Other',
             },
@@ -405,11 +422,19 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
             },
             context_length: 0,
             supported_parameters: ['max_tokens', 'temperature', 'tools', 'reasoning', 'include_reasoning', 'reasoning_effort', 'thinking', 'output_reasoning'],
+            modalities: {
+                input: ['text', 'image', 'audio', 'file'],
+                output: ['text'],
+            },
             capabilities: {
+                vision: true,
+                image_input: true,
                 reasoning: true,
                 thinking: true,
                 reasoning_levels: getReasoningLevels( DEFAULT_REASONING_EFFORTS ),
             },
+            supports_vision: true,
+            supports_images: true,
             supports_reasoning: true,
             reasoning: true,
             reasoning_effort: true,
