@@ -5,6 +5,10 @@ const RateLimitSpec = z.object( {
   tokensPerMinute: z.number( { error: 'tokensPerMinute must be a number' } ).int( 'tokensPerMinute must be an integer' ).positive( 'tokensPerMinute must be > 0' ).optional(),
   requestsPerMinute: z.number( { error: 'requestsPerMinute must be a number' } ).int( 'requestsPerMinute must be an integer' ).positive( 'requestsPerMinute must be > 0' ).optional(),
   requestsPerDay: z.number( { error: 'requestsPerDay must be a number' } ).int( 'requestsPerDay must be an integer' ).positive( 'requestsPerDay must be > 0' ).optional(),
+  // STT-specific: maximum seconds of audio that can be processed
+  audioSecondsPerHour: z.number( { error: 'audioSecondsPerHour must be a number' } ).int( 'audioSecondsPerHour must be an integer' ).positive( 'audioSecondsPerHour must be > 0' ).optional().describe( 'Maximum seconds of audio that can be processed per hour (STT)' ),
+  audioSecondsPerDay: z.number( { error: 'audioSecondsPerDay must be a number' } ).int( 'audioSecondsPerDay must be an integer' ).positive( 'audioSecondsPerDay must be > 0' ).optional().describe( 'Maximum seconds of audio that can be processed per day (STT)' ),
+  tokensPerDay: z.number( { error: 'tokensPerDay must be a number' } ).int( 'tokensPerDay must be an integer' ).positive( 'tokensPerDay must be > 0' ).optional().describe( 'Maximum tokens per day' ),
 } ).strict()
 
 const RateLimitSchema = RateLimitSpec.optional()
@@ -15,6 +19,10 @@ const ImageModelsSchema = z.object( {
 } ).strict().optional().describe( 'Provider image routing flags. Explicitly set image_generation and/or image_editing to enable those endpoints.' )
 
 const EmbeddingsSchema = z.boolean( { error: 'embeddings must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for embeddings routing and excluded from chat/completions/responses fallback' )
+
+const STTSchema = z.boolean( { error: 'stt must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for speech-to-text routing (audio/transcriptions, audio/translations) and excluded from chat/completions/responses/embeddings fallback' )
+
+const TTSSchema = z.boolean( { error: 'tts must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for text-to-speech routing (audio/speech) and excluded from chat/completions/responses/embeddings fallback' )
 
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
 const InputModalitySchema = z.enum( ['text', 'image', 'audio', 'file', 'pdf'] )
@@ -49,6 +57,8 @@ const OpenAIModelSchema = z.object( {
   modalities: ModalitiesSchema,
   imageModels: ImageModelsSchema,
   embeddings: EmbeddingsSchema,
+  stt: STTSchema,
+  tts: TTSSchema,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
@@ -66,6 +76,25 @@ const OpenAIModelSchema = z.object( {
     }
     if ( val.imageModels && val.imageModels.image_generation !== true && val.imageModels.image_editing !== true ) {
       ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['imageModels'], message: 'imageModels must enable at least one endpoint: image_generation or image_editing' } )
+    }
+
+    // STT providers must not also be embeddings or image-only providers
+    if ( val.stt && val.embeddings ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'stt and embeddings cannot both be true on the same provider' } )
+    }
+    if ( val.stt && val.imageModels ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['stt'], message: 'stt cannot be true on an image-only provider (use imageModels)' } )
+    }
+
+    // TTS providers must not also be embeddings, image, or STT providers
+    if ( val.tts && val.embeddings ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, message: 'tts and embeddings cannot both be true on the same provider' } )
+    }
+    if ( val.tts && val.imageModels ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['tts'], message: 'tts cannot be true on an image-only provider (use imageModels)' } )
+    }
+    if ( val.tts && val.stt ) {
+      ctx.addIssue( { code: z.ZodIssueCode.custom, path: ['tts'], message: 'tts and stt cannot both be true on the same provider' } )
     }
 
     if ( hasObject ) {

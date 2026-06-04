@@ -1,4 +1,4 @@
-const DEFAULT_COOLDOWN_MS = 30_000;
+const DEFAULT_COOLDOWN_MS = 5_000;
 
 export function isRetryableUpstreamStatus( status: number ): boolean {
     return status === 429 || ( status >= 500 && status <= 599 );

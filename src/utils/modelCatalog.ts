@@ -51,6 +51,7 @@ export type UnifiedModelCatalogEntry = {
         reasoning: boolean;
         thinking: boolean;
         reasoning_levels: Array<Exclude<ReasoningEffort, 'none'>>;
+        stt: boolean;
     };
     supports_vision: boolean;
     supports_images: boolean;
@@ -330,6 +331,7 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
             const inputModalities = config.modalities?.input ?? normalized.inputModalities;
             const outputModalities = config.modalities?.output ?? normalized.outputModalities;
             const hasVision = inputModalities.includes( 'image' );
+            const isSttProvider = config.stt === true;
 
             const entry: UnifiedModelCatalogEntry = {
                 id: configMeta.id,
@@ -369,6 +371,7 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                     reasoning: reasoningSupported,
                     thinking: reasoningSupported,
                     reasoning_levels: getReasoningLevels( configMeta.reasoningEfforts ),
+                    stt: isSttProvider,
                 },
                 supports_vision: hasVision,
                 supports_images: hasVision,
@@ -432,6 +435,7 @@ function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): UnifiedMode
                 reasoning: true,
                 thinking: true,
                 reasoning_levels: getReasoningLevels( DEFAULT_REASONING_EFFORTS ),
+                stt: false,
             },
             supports_vision: true,
             supports_images: true,

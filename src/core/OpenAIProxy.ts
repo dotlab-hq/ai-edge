@@ -1,6 +1,5 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import { randomBytes } from 'crypto';
 import { stream } from 'hono/streaming';
 import { rateLimitManager } from './RateLimitManager';
 import { CONFIG } from '@/utils/schema.lookup';
@@ -64,6 +63,9 @@ export class OpenAIProxy {
         this.app.post( '/v1/completions', ( c: Context ) => this.handleCompletions( c ) );
         this.app.post( '/v1/images/generations', ( c: Context ) => this.handleImageGenerations( c ) );
         this.app.post( '/v1/images/edits', ( c: Context ) => this.handleImageEdits( c ) );
+        this.app.post( '/v1/audio/transcriptions', ( c: Context ) => this.handleAudioTranscriptions( c ) );
+        this.app.post( '/v1/audio/translations', ( c: Context ) => this.handleAudioTranslations( c ) );
+        this.app.post( '/v1/audio/speech', ( c: Context ) => this.handleAudioSpeech( c ) );
     }
 
     private async handleModels( c: Context ) {
@@ -177,6 +179,659 @@ export class OpenAIProxy {
 
     private async handleImageEdits( c: Context ) {
         return this.proxyRequest( c, 'images/edits' );
+    }
+
+    // ── Speech-to-Text (STT) handlers ──
+
+    private isSttEnabled( config: OpenAIModelConfig ): boolean {
+        return config.stt === true;
+    }
+
+    private isTtsEnabled( config: OpenAIModelConfig ): boolean {
+        return config.tts === true;
+    }
+
+    private isSttOrImageOnlyConfig( config: OpenAIModelConfig ): boolean {
+        return this.isSttEnabled( config ) || this.isTtsEnabled( config ) || this.isImageOnlyConfig( config );
+    }
+
+    private async handleAudioTranscriptions( c: Context ) {
+        return this.handleAudioRequest( c, 'audio/transcriptions' );
+    }
+
+    private async handleAudioTranslations( c: Context ) {
+        return this.handleAudioRequest( c, 'audio/translations' );
+    }
+
+    /**
+     * Handle multipart/form-data audio requests (transcriptions + translations).
+     * These differ from JSON-based endpoints because:
+     *  1. The request body is multipart/form-data, not JSON
+     *  2. Rate limiting is based on audio duration (seconds), not tokens
+     *  3. Only STT-flagged providers should receive these requests
+     */
+    private async handleAudioRequest( c: Context, endpoint: string ): Promise<any> {
+        const requestStartedAt = Date.now();
+        let lastFailure: { status: number; payload: any } | null = null;
+
+        try {
+            // Parse the multipart form data
+            const formData = await c.req.formData();
+            const model = formData.get( 'model' ) as string | null;
+            const file = formData.get( 'file' ) as File | null;
+
+            if ( !model ) {
+                return c.json( { error: { message: 'model is required', type: 'invalid_request_error' } }, 400 );
+            }
+            if ( !file ) {
+                return c.json( { error: { message: 'file is required', type: 'invalid_request_error' } }, 400 );
+            }
+
+            // Estimate audio duration from the file size and format
+            // For WAV/PCM: duration ≈ fileSize / (sampleRate * channels * bytesPerSample)
+            // For compressed formats (mp3, m4a, etc.): use a rough heuristic
+            const audioSeconds = this.estimateAudioDuration( file );
+
+            // Find STT-capable backends for this model
+            const matchingBackends = this.getBackendsForModel( model, endpoint );
+            if ( !matchingBackends.length ) {
+                console.error( `[${endpoint}] No STT backends found for model: ${model}` );
+                return c.json( {
+                    error: {
+                        message: `Model not found: ${model}`,
+                        type: 'invalid_request_error'
+                    }
+                }, 400 );
+            }
+
+            const backends = this.getOptimizedBackends( model, endpoint, matchingBackends );
+            console.error( `[${endpoint}] Attempting backends for model ${model}: ${backends.map( b => b.id ).join( ', ' )}` );
+
+            for ( const config of backends ) {
+                const candidateModels = this.getCandidateModelsForProvider( config, model );
+
+                for ( const selectedModel of candidateModels ) {
+                    // Check cooldown
+                    const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                    if ( cooldownRemainingMs > 0 ) {
+                        console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+                        continue;
+                    }
+
+                    // Check STT-specific rate limits (audio seconds per hour/day)
+                    const sttRateLimit = this.getEffectiveSTTRateLimit( config, selectedModel );
+                    const audioRateCheck = await rateLimitManager.checkAndConsumeAudioSeconds(
+                        config.id,
+                        audioSeconds,
+                        sttRateLimit,
+                        selectedModel
+                    );
+                    if ( !audioRateCheck.allowed ) {
+                        console.error( `[${endpoint}] STT rate limit exceeded for ${config.id}: ${audioRateCheck.reason}` );
+                        continue;
+                    }
+
+                    try {
+                        const url = this.buildApiUrl( config, endpoint );
+
+                        // Build multipart form data for upstream
+                        const upstreamForm = new FormData();
+                        upstreamForm.append( 'model', selectedModel );
+                        upstreamForm.append( 'file', file );
+
+                        // Forward all optional fields
+                        const language = formData.get( 'language' );
+                        if ( language ) upstreamForm.append( 'language', language as string );
+                        const prompt = formData.get( 'prompt' );
+                        if ( prompt ) upstreamForm.append( 'prompt', prompt as string );
+                        const responseFormat = formData.get( 'response_format' );
+                        if ( responseFormat ) upstreamForm.append( 'response_format', responseFormat as string );
+                        const temperature = formData.get( 'temperature' );
+                        if ( temperature ) upstreamForm.append( 'temperature', temperature as string );
+                        const timestampGranularities = formData.getAll( 'timestamp_granularities[]' );
+                        for ( const tg of timestampGranularities ) {
+                            upstreamForm.append( 'timestamp_granularities[]', tg as string );
+                        }
+
+                        // OpenAI v2025+ streaming STT fields
+                        const streamField = formData.get( 'stream' );
+                        const wantsStream = streamField === 'true' || streamField === '1';
+                        if ( wantsStream ) {
+                            upstreamForm.append( 'stream', 'true' );
+                        }
+
+                        const includeFields = formData.getAll( 'include[]' );
+                        for ( const inc of includeFields ) {
+                            upstreamForm.append( 'include[]', inc as string );
+                        }
+
+                        const chunkingStrategy = formData.get( 'chunking_strategy' );
+                        if ( chunkingStrategy ) {
+                            upstreamForm.append( 'chunking_strategy', chunkingStrategy as string );
+                        }
+
+                        // Speaker diarization fields (OpenAI Realtime / Batch API)
+                        const knownSpeakerNames = formData.getAll( 'known_speaker_names[]' );
+                        for ( const name of knownSpeakerNames ) {
+                            upstreamForm.append( 'known_speaker_names[]', name as string );
+                        }
+                        const knownSpeakerReferences = formData.getAll( 'known_speaker_references[]' );
+                        for ( const ref of knownSpeakerReferences ) {
+                            upstreamForm.append( 'known_speaker_references[]', ref as string );
+                        }
+
+                        console.info( `[${endpoint}] upstream_request provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds} stream=${wantsStream}` );
+
+                        const upstreamResponse = await fetchWithProxy( url, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${config.apiKey}`,
+                                'User-Agent': 'ai-edge/1.0',
+                            },
+                            body: upstreamForm,
+                        }, CONFIG.proxy, { skipTimeout: wantsStream } );
+
+                        backendCooldownManager.markFromStatus( config.id, selectedModel, upstreamResponse.status );
+
+                        if ( upstreamResponse.status === 429 ) {
+                            this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
+                            console.warn( `[${endpoint}] 429 from ${config.id}, trying next backend` );
+                            continue;
+                        }
+
+                        if ( !upstreamResponse.ok ) {
+                            lastFailure = {
+                                status: upstreamResponse.status,
+                                payload: await this.parseResponsePayload( upstreamResponse ),
+                            };
+                            this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
+                            console.error( `[${endpoint}] ${upstreamResponse.status} from ${config?.id ?? config?.name}` );
+                            continue;
+                        }
+
+                        // Handle streaming SSE response (transcript.text.delta / transcript.text.done)
+                        const upstreamContentType = upstreamResponse.headers.get( 'content-type' ) || 'application/json';
+                        if ( wantsStream && upstreamContentType.includes( 'text/event-stream' ) ) {
+                            console.info( `[${endpoint}] stream_start provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds}` );
+                            this.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                            return this.proxyAudioStream( c, upstreamResponse, endpoint, config.id, selectedModel );
+                        }
+
+                        // Non-streaming: read full response and forward
+                        const responseText = await upstreamResponse.text();
+
+                        console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds} totalMs=${Date.now() - requestStartedAt}` );
+                        this.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+
+                        // Return the response in the same format as upstream
+                        if ( upstreamContentType.includes( 'text/plain' ) || upstreamContentType.includes( 'text/vtt' ) || upstreamContentType.includes( 'application/x-subrip' ) ) {
+                            c.header( 'Content-Type', upstreamContentType );
+                            return c.text( responseText );
+                        }
+
+                        // Default: return JSON
+                        try {
+                            return c.json( JSON.parse( responseText ) );
+                        } catch {
+                            c.header( 'Content-Type', upstreamContentType );
+                            return c.body( responseText );
+                        }
+                    } catch ( error: any ) {
+                        this.providerStats.recordFailure( config.id, selectedModel );
+                        lastFailure = {
+                            status: 502,
+                            payload: {
+                                error: {
+                                    message: error?.message || 'Upstream request failed',
+                                    type: 'upstream_error'
+                                }
+                            }
+                        };
+                        console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
+                        continue;
+                    }
+                }
+            }
+
+            if ( lastFailure ) {
+                const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
+                console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
+                return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
+            }
+
+            console.error( `\n❌ [${endpoint}] ALL PROVIDERS FAILED\nModel: ${model}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+            return c.json( { error: { message: 'All providers failed', type: 'internal_error' } }, 502 );
+
+        } catch ( error: any ) {
+            console.error( `[${endpoint}] Exception:`, error?.message || String( error ) );
+            return c.json( { error: { message: error?.message || 'Internal error', type: 'internal_error' } }, 500 );
+        }
+    }
+
+    /**
+     * Estimate audio duration in seconds from a File object.
+     * Uses file extension heuristics when precise duration calculation isn't possible.
+     */
+    private estimateAudioDuration( file: File ): number {
+        const name = file.name.toLowerCase();
+        const sizeBytes = file.size;
+
+        // For WAV files, try to parse the header for exact duration
+        // WAV header: bytes 28-31 = byteRate (sampleRate * channels * bitsPerSample/8)
+        // duration = fileSize / byteRate (approx, header is 44 bytes)
+        if ( name.endsWith( '.wav' ) || name.endsWith( '.wave' ) ) {
+            // We'll use a rough heuristic based on typical 16kHz mono 16-bit audio
+            // 16000 * 1 * 2 = 32000 bytes/second
+            const defaultByteRate = 32000; // 16kHz, mono, 16-bit
+            return Math.max( 1, Math.ceil( sizeBytes / defaultByteRate ) );
+        }
+
+        // For MP3 files: ~128kbps = 16000 bytes/second, ~64kbps = 8000 bytes/second
+        if ( name.endsWith( '.mp3' ) ) {
+            const bytesPerSecond = 16000; // assume ~128kbps
+            return Math.max( 1, Math.ceil( sizeBytes / bytesPerSecond ) );
+        }
+
+        // For M4A/AAC files: ~128kbps
+        if ( name.endsWith( '.m4a' ) || name.endsWith( '.aac' ) || name.endsWith( '.mp4' ) ) {
+            const bytesPerSecond = 16000;
+            return Math.max( 1, Math.ceil( sizeBytes / bytesPerSecond ) );
+        }
+
+        // For OGG/Opus: ~32kbps typical for voice
+        if ( name.endsWith( '.ogg' ) || name.endsWith( '.opus' ) || name.endsWith( '.oga' ) ) {
+            const bytesPerSecond = 4000;
+            return Math.max( 1, Math.ceil( sizeBytes / bytesPerSecond ) );
+        }
+
+        // For FLAC: ~500KB/min ≈ 8333 bytes/second
+        if ( name.endsWith( '.flac' ) ) {
+            const bytesPerSecond = 8333;
+            return Math.max( 1, Math.ceil( sizeBytes / bytesPerSecond ) );
+        }
+
+        // Default fallback: assume 64kbps
+        return Math.max( 1, Math.ceil( sizeBytes / 8000 ) );
+    }
+
+    private getEffectiveSTTRateLimit( config: OpenAIModelConfig, modelName?: string ): Config['rateLimit'] {
+        // Check per-model rate limit first
+        if ( modelName && config.individualLimit ) {
+            const modelEntry = config.models.find( m => {
+                const candidate = typeof m === 'string' ? m : ( m as any ).model;
+                return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( modelName ).normalizedId;
+            } );
+            if ( modelEntry && typeof modelEntry === 'object' && ( modelEntry as any ).rateLimit ) {
+                return ( modelEntry as any ).rateLimit;
+            }
+        }
+        // Fall back to provider-level rate limit
+        return config.rateLimit;
+    }
+
+    private getEffectiveTTSRateLimit( config: OpenAIModelConfig, modelName?: string ): Config['rateLimit'] {
+        // Check per-model rate limit first
+        if ( modelName && config.individualLimit ) {
+            const modelEntry = config.models.find( m => {
+                const candidate = typeof m === 'string' ? m : ( m as any ).model;
+                return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( modelName ).normalizedId;
+            } );
+            if ( modelEntry && typeof modelEntry === 'object' && ( modelEntry as any ).rateLimit ) {
+                return ( modelEntry as any ).rateLimit;
+            }
+        }
+        // Fall back to provider-level rate limit
+        return config.rateLimit;
+    }
+
+    /**
+     * Map OpenAI-style TTS voice names to provider-native voice names.
+     * If the voice is already recognized by the provider, it is returned as-is.
+     */
+    private mapTTSVoice( voice: string, model: string ): string {
+        // Voices that Orpheus already accepts natively
+        const orpheusVoices = new Set( [
+            'autumn', 'diana', 'hannah', 'austin', 'daniel', 'troy',
+        ] );
+        const arabicVoices = new Set( [
+            'abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha',
+        ] );
+
+        const lower = voice.toLowerCase();
+
+        if ( model.includes( 'arabic' ) ) {
+            if ( arabicVoices.has( lower ) ) return lower;
+            // Fallback for Arabic model
+            return 'abdullah';
+        }
+
+        // English model
+        if ( orpheusVoices.has( lower ) ) return lower;
+
+        // OpenAI voice → Orpheus voice mapping
+        const openaiToOrpheus: Record<string, string> = {
+            alloy: 'troy',
+            echo: 'daniel',
+            fable: 'hannah',
+            onyx: 'austin',
+            nova: 'diana',
+            shimmer: 'autumn',
+        };
+
+        return openaiToOrpheus[ lower ] ?? 'troy';
+    }
+
+    /**
+     * Force or adapt the response format for a given provider.
+     * Groq Orpheus only supports "wav", so we override non-wav requests.
+     */
+    private getUpstreamResponseFormat( config: OpenAIModelConfig, requestedFormat?: string ): string | undefined {
+        if ( !requestedFormat ) return undefined;
+
+        const fmt = requestedFormat.toLowerCase();
+
+        // Groq Orpheus only supports wav
+        if ( config.baseUrl.includes( 'groq.com' ) && fmt !== 'wav' ) {
+            return 'wav';
+        }
+
+        return requestedFormat;
+    }
+
+    /**
+     * Proxy a streaming SSE response from an upstream STT provider.
+     * Forwards events like transcript.text.delta, transcript.text.done, etc.
+     * directly to the client without transformation, since STT SSE format
+     * is provider-specific.
+     */
+    private async proxyAudioStream(
+        c: Context,
+        upstreamResponse: Response,
+        endpoint: string,
+        providerId: string,
+        selectedModel: string,
+    ): Promise<Response> {
+        const encoder = new TextEncoder();
+        const upstreamReader = upstreamResponse.body!.getReader();
+        const decoder = new TextDecoder();
+        let clientDisconnected = false;
+
+        c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+        c.header( 'Cache-Control', 'no-cache, no-transform' );
+        c.header( 'Connection', 'keep-alive' );
+        c.header( 'X-Accel-Buffering', 'no' );
+
+        const clientSignal = c.req.raw.signal;
+        const onClientAbort = () => {
+            clientDisconnected = true;
+            upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
+        };
+        clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+
+        const stream = new ReadableStream( {
+            start( controller ) {
+                ( async () => {
+                    try {
+                        while ( !clientDisconnected ) {
+                            const { done, value } = await upstreamReader.read();
+                            if ( done ) break;
+                            if ( value ) {
+                                // Forward raw SSE chunks from upstream directly to client
+                                controller.enqueue( value );
+                            }
+                        }
+
+                        console.info( `[${endpoint}] stream_complete provider=${providerId} model=${selectedModel}` );
+                    } catch ( err: any ) {
+                        console.error( `[${endpoint}] stream_error provider=${providerId} model=${selectedModel}: ${err?.message || String( err )}` );
+                        // Try to emit an error event so the client knows
+                        try {
+                            const errorEvent = `event: error\ndata: ${JSON.stringify( {
+                                type: 'error',
+                                error: { type: 'upstream_error', message: err?.message || 'Stream error' },
+                            } )}\n\n`;
+                            controller.enqueue( encoder.encode( errorEvent ) );
+                        } catch { /* stream may already be closed */ }
+                    }
+                } )().finally( () => {
+                    clientSignal.removeEventListener( 'abort', onClientAbort );
+                    try { upstreamReader.releaseLock(); } catch { /* ignore */ }
+                    try { controller.close(); } catch { /* stream may already be closed */ }
+                } );
+            },
+        } );
+
+        return new Response( stream, {
+            status: 200,
+            headers: {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        } );
+    }
+
+    /**
+     * Handle POST /v1/audio/speech — Text-to-Speech (TTS).
+     * The OpenAI TTS API accepts a JSON body (not multipart) with:
+     *   model, input (text), voice, instructions, response_format, speed, stream_format
+     * and returns raw audio bytes (or SSE stream).
+     */
+    private async handleAudioSpeech( c: Context ) {
+        const endpoint = 'audio/speech';
+        const requestStartedAt = Date.now();
+        let lastFailure: { status: number; payload: any } | null = null;
+
+        try {
+            const body = await c.req.json().catch( () => ( {} ) );
+            const model = body?.model as string | undefined;
+            const input = body?.input as string | undefined;
+            const voice = body?.voice as string | undefined;
+
+            if ( !model ) {
+                return c.json( { error: { message: 'model is required', type: 'invalid_request_error' } }, 400 );
+            }
+            if ( !input || typeof input !== 'string' ) {
+                return c.json( { error: { message: 'input is required', type: 'invalid_request_error' } }, 400 );
+            }
+            if ( !voice ) {
+                return c.json( { error: { message: 'voice is required', type: 'invalid_request_error' } }, 400 );
+            }
+
+            const characters = input.length;
+            const wantsStream = body?.stream === true || body?.stream_format != null;
+
+            // Find TTS-capable backends
+            const matchingBackends = this.getBackendsForModel( model, endpoint );
+            if ( !matchingBackends.length ) {
+                console.error( `[${endpoint}] No TTS backends found for model: ${model}` );
+                return c.json( {
+                    error: {
+                        message: `Model not found: ${model}`,
+                        type: 'invalid_request_error'
+                    }
+                }, 400 );
+            }
+
+            const backends = this.getOptimizedBackends( model, endpoint, matchingBackends );
+            console.error( `[${endpoint}] Attempting backends for model ${model}: ${backends.map( b => b.id ).join( ', ' )}` );
+
+            for ( const config of backends ) {
+                const candidateModels = this.getCandidateModelsForProvider( config, model );
+
+                for ( const selectedModel of candidateModels ) {
+                    // Check cooldown
+                    const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                    if ( cooldownRemainingMs > 0 ) {
+                        console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
+                        continue;
+                    }
+
+                    // Check TTS-specific rate limits (characters per hour/day)
+                    const ttsRateLimit = this.getEffectiveTTSRateLimit( config, selectedModel );
+                    const charRateCheck = await rateLimitManager.checkAndConsumeTTSCharacters(
+                        config.id,
+                        characters,
+                        ttsRateLimit,
+                        selectedModel
+                    );
+                    if ( !charRateCheck.allowed ) {
+                        console.error( `[${endpoint}] TTS rate limit exceeded for ${config.id}: ${charRateCheck.reason}` );
+                        continue;
+                    }
+
+                    try {
+                        const url = this.buildApiUrl( config, endpoint );
+
+                        // Map OpenAI-style voices to provider-native voices
+                        const mappedVoice = this.mapTTSVoice( voice, selectedModel );
+
+                        // Build upstream JSON body
+                        const upstreamBody: Record<string, any> = {
+                            model: selectedModel,
+                            input,
+                            voice: mappedVoice,
+                        };
+                        if ( body?.instructions ) upstreamBody.instructions = body.instructions;
+                        // Groq Orpheus only supports "wav"; force it to avoid 400 errors
+                        const upstreamFormat = this.getUpstreamResponseFormat( config, body?.response_format );
+                        if ( upstreamFormat ) upstreamBody.response_format = upstreamFormat;
+                        if ( body?.speed != null ) upstreamBody.speed = body.speed;
+                        if ( wantsStream && body?.stream_format ) upstreamBody.stream_format = body.stream_format;
+
+                        console.info( `[${endpoint}] upstream_request provider=${config.id} model=${selectedModel} voice=${mappedVoice} characters=${characters} stream=${wantsStream}` );
+
+                        const upstreamResponse = await fetchWithProxy( url, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${config.apiKey}`,
+                                'Content-Type': 'application/json',
+                                'User-Agent': 'ai-edge/1.0',
+                            },
+                            body: JSON.stringify( upstreamBody ),
+                        }, CONFIG.proxy, { skipTimeout: wantsStream } );
+
+                        backendCooldownManager.markFromStatus( config.id, selectedModel, upstreamResponse.status );
+
+                        if ( upstreamResponse.status === 429 ) {
+                            this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
+                            console.warn( `[${endpoint}] 429 from ${config.id}, trying next backend` );
+                            continue;
+                        }
+
+                        if ( !upstreamResponse.ok ) {
+                            lastFailure = {
+                                status: upstreamResponse.status,
+                                payload: await this.parseResponsePayload( upstreamResponse ),
+                            };
+                            this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
+                            console.error( `[${endpoint}] ${upstreamResponse.status} from ${config?.id ?? config?.name}` );
+                            continue;
+                        }
+
+                        const upstreamContentType = upstreamResponse.headers.get( 'content-type' ) || 'application/octet-stream';
+
+                        // Streaming response (SSE with audio chunks)
+                        if ( wantsStream && upstreamContentType.includes( 'text/event-stream' ) ) {
+                            console.info( `[${endpoint}] stream_start provider=${config.id} model=${selectedModel} characters=${characters}` );
+                            this.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                            return this.proxyAudioStream( c, upstreamResponse, endpoint, config.id, selectedModel );
+                        }
+
+                        // Streaming audio (raw audio bytes, not SSE)
+                        if ( wantsStream && upstreamResponse.body ) {
+                            console.info( `[${endpoint}] audio_stream provider=${config.id} model=${selectedModel} characters=${characters}` );
+                            this.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+
+                            const responseFormat = upstreamBody.response_format || body?.response_format || 'mp3';
+                            const mimeMap: Record<string, string> = {
+                                mp3: 'audio/mpeg',
+                                opus: 'audio/opus',
+                                aac: 'audio/aac',
+                                flac: 'audio/flac',
+                                wav: 'audio/wav',
+                                pcm: 'audio/pcm',
+                            };
+                            const contentType = mimeMap[ responseFormat ] || 'audio/mpeg';
+
+                            // Pipe the audio stream directly to the client
+                            const clientSignal = c.req.raw.signal;
+                            let clientDisconnected = false;
+                            const upstreamReader = upstreamResponse.body!.getReader();
+                            const onClientAbort = () => {
+                                clientDisconnected = true;
+                                upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
+                            };
+                            clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
+
+                            const audioStream = new ReadableStream( {
+                                start( controller ) {
+                                    ( async () => {
+                                        try {
+                                            while ( !clientDisconnected ) {
+                                                const { done, value } = await upstreamReader.read();
+                                                if ( done ) break;
+                                                if ( value ) controller.enqueue( value );
+                                            }
+                                        } catch ( err: any ) {
+                                            if ( !clientDisconnected ) {
+                                                console.error( `[${endpoint}] stream_error provider=${config.id}: ${err?.message}` );
+                                            }
+                                        } finally {
+                                            clientSignal.removeEventListener( 'abort', onClientAbort );
+                                            try { upstreamReader.releaseLock(); } catch { /* ignore */ }
+                                            try { controller.close(); } catch { /* already closed */ }
+                                        }
+                                    } )();
+                                },
+                            } );
+
+                            return new Response( audioStream, {
+                                status: 200,
+                                headers: {
+                                    'Content-Type': contentType,
+                                    'Transfer-Encoding': 'chunked',
+                                    'Cache-Control': 'no-cache',
+                                },
+                            } );
+                        }
+
+                        // Non-streaming: read the full audio response and forward
+                        const responseBuffer = await upstreamResponse.arrayBuffer();
+                        // Use the format we actually sent upstream (may differ from client request)
+                        const effectiveFormat = upstreamBody.response_format || body?.response_format || 'mp3';
+                        const mimeMap: Record<string, string> = {
+                            mp3: 'audio/mpeg',
+                            opus: 'audio/opus',
+                            aac: 'audio/aac',
+                            flac: 'audio/flac',
+                            wav: 'audio/wav',
+                            pcm: 'audio/pcm',
+                        };
+                        const contentType = mimeMap[ effectiveFormat ] || 'audio/mpeg';
+
+                        console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} characters=${characters} totalMs=${Date.now() - requestStartedAt}` );
+                        this.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+
+                        c.header( 'Content-Type', contentType );
+                        return c.body( responseBuffer );
+                    } catch ( error: any ) {
+                        this.providerStats.recordFailure( config.id, selectedModel );
+                        console.error( `[${endpoint}] error provider=${config.id} model=${selectedModel}: ${error?.message}` );
+                    }
+                }
+            }
+
+            // All backends exhausted
+            if ( lastFailure ) {
+                return c.json( lastFailure.payload, lastFailure.status as any );
+            }
+            return c.json( { error: { message: 'All TTS backends failed', type: 'server_error' } }, 502 );
+        } catch ( error: any ) {
+            console.error( `[${endpoint}] request_error: ${error?.message}` );
+            return c.json( { error: { message: error?.message || 'Internal error', type: 'server_error' } }, 500 );
+        }
     }
 
     private async handleOpenAIRequest( c: Context, endpoint: string ) {
@@ -1152,12 +1807,16 @@ export class OpenAIProxy {
             // For capability-specific endpoints, only consider providers that explicitly support them.
             if ( endpoint === 'embeddings' ) {
                 if ( !this.isEmbeddingsEnabled( config ) ) continue;
+            } else if ( endpoint === 'audio/transcriptions' || endpoint === 'audio/translations' ) {
+                if ( !this.isSttEnabled( config ) ) continue;
+            } else if ( endpoint === 'audio/speech' ) {
+                if ( !this.isTtsEnabled( config ) ) continue;
             } else if ( endpoint === 'images/generations' ) {
                 if ( !this.isImageGenerationEnabled( config ) ) continue;
             } else if ( endpoint === 'images/edits' ) {
                 if ( !this.isImageEditingEnabled( config ) ) continue;
             } else if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
-                if ( this.isImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) ) continue;
+                if ( this.isSttOrImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) ) continue;
             }
 
             if ( matchesRequestedModel ) {

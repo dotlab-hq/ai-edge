@@ -56,6 +56,24 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
+        },
+        "audioSecondsPerHour": {
+          "description": "Maximum seconds of audio that can be processed per hour (STT)",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "audioSecondsPerDay": {
+          "description": "Maximum seconds of audio that can be processed per day (STT)",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tokensPerDay": {
+          "description": "Maximum tokens per day",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "additionalProperties": false
@@ -333,6 +351,24 @@
                               "type": "integer",
                               "exclusiveMinimum": 0,
                               "maximum": 9007199254740991
+                            },
+                            "audioSecondsPerHour": {
+                              "description": "Maximum seconds of audio that can be processed per hour (STT)",
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "audioSecondsPerDay": {
+                              "description": "Maximum seconds of audio that can be processed per day (STT)",
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "tokensPerDay": {
+                              "description": "Maximum tokens per day",
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
                             }
                           },
                           "additionalProperties": false
@@ -503,6 +539,16 @@
                 "description": "If true, this provider is reserved for embeddings routing and excluded from chat/completions/responses fallback",
                 "type": "boolean"
               },
+              "stt": {
+                "default": false,
+                "description": "If true, this provider is reserved for speech-to-text routing (audio/transcriptions, audio/translations) and excluded from chat/completions/responses/embeddings fallback",
+                "type": "boolean"
+              },
+              "tts": {
+                "default": false,
+                "description": "If true, this provider is reserved for text-to-speech routing (audio/speech) and excluded from chat/completions/responses/embeddings fallback",
+                "type": "boolean"
+              },
               "individualLimit": {
                 "default": false,
                 "type": "boolean"
@@ -529,6 +575,24 @@
                     "maximum": 9007199254740991
                   },
                   "requestsPerDay": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "audioSecondsPerHour": {
+                    "description": "Maximum seconds of audio that can be processed per hour (STT)",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "audioSecondsPerDay": {
+                    "description": "Maximum seconds of audio that can be processed per day (STT)",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "tokensPerDay": {
+                    "description": "Maximum tokens per day",
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -575,6 +639,8 @@
               "name",
               "models",
               "embeddings",
+              "stt",
+              "tts",
               "individualLimit",
               "baseUrl",
               "apiKey",
@@ -627,6 +693,24 @@
                               "maximum": 9007199254740991
                             },
                             "requestsPerDay": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "audioSecondsPerHour": {
+                              "description": "Maximum seconds of audio that can be processed per hour (STT)",
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "audioSecondsPerDay": {
+                              "description": "Maximum seconds of audio that can be processed per day (STT)",
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "tokensPerDay": {
+                              "description": "Maximum tokens per day",
                               "type": "integer",
                               "exclusiveMinimum": 0,
                               "maximum": 9007199254740991
@@ -808,6 +892,24 @@
                     "maximum": 9007199254740991
                   },
                   "requestsPerDay": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "audioSecondsPerHour": {
+                    "description": "Maximum seconds of audio that can be processed per hour (STT)",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "audioSecondsPerDay": {
+                    "description": "Maximum seconds of audio that can be processed per day (STT)",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "tokensPerDay": {
+                    "description": "Maximum tokens per day",
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991

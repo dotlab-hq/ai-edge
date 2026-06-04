@@ -59,13 +59,23 @@ async function loadStats() {
                 const usage = await rateLimitManager.getUsage( config.id, modelName );
                 if ( usage ) {
                     const tokensLimit = config.rateLimit?.tokensPerMinute ?? config.rateLimit?.requestsPerMinute ?? 0;
-                    providerStats[modelName] = {
+                    const isStt = ( config as any ).stt === true;
+                    const modelStats: Record<string, any> = {
                         requestsUsed: usage.dailyRequests,
                         dailyRequests: usage.dailyRequests,
                         tokensUsed: Math.ceil( tokensLimit - usage.tokensRemaining ),
                         tokensRemaining: usage.tokensRemaining,
-                        limits: config.rateLimit
+                        limits: config.rateLimit,
                     };
+
+                    // Include audio seconds usage for STT providers
+                    if ( isStt ) {
+                        modelStats.audioSecondsThisHour = usage.audioSecondsThisHour;
+                        modelStats.audioSecondsToday = usage.audioSecondsToday;
+                        modelStats.sttRateLimit = ( config as any ).sttRateLimit;
+                    }
+
+                    providerStats[modelName] = modelStats;
                 }
             }
 
