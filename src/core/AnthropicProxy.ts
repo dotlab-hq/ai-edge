@@ -410,8 +410,7 @@ export class AnthropicProxy {
     const fallbackBackends: OpenAIModelConfig[] = [];
 
     for ( const config of configs ) {
-      // Skip STT-only, TTS-only, and embeddings providers for chat/messages routing
-      if ( this.isSttOrTtsOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) || !this.providerSupportsModalities( config, requiredModalities ) ) {
+      if ( this.isEmbeddingsEnabled( config ) || !this.providerSupportsModalities( config, requiredModalities ) ) {
         continue;
       }
 
@@ -444,10 +443,6 @@ export class AnthropicProxy {
 
   private isEmbeddingsEnabled( config: OpenAIModelConfig ): boolean {
     return config.embeddings === true;
-  }
-
-  private isSttOrTtsOnlyConfig( config: OpenAIModelConfig ): boolean {
-    return config.stt === true || config.tts === true;
   }
 
   private isGeminiProvider( config: OpenAIModelConfig ): boolean {
