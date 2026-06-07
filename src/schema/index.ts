@@ -24,6 +24,8 @@ const STTSchema = z.boolean( { error: 'stt must be a boolean' } ).optional().def
 
 const TTSSchema = z.boolean( { error: 'tts must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for text-to-speech routing (audio/speech) and excluded from chat/completions/responses/embeddings fallback' )
 
+const SpooferSchema = z.boolean( { error: 'spoofer must be a boolean' } ).optional().default( false ).describe( 'If true, randomly generated IP spoofing headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP, etc.) are added to every upstream request' )
+
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
 const InputModalitySchema = z.enum( ['text', 'image', 'audio', 'file', 'pdf'] )
 const OutputModalitySchema = z.enum( ['text', 'audio'] )
@@ -223,6 +225,7 @@ const ToolsSchema = z.object( {
 
 export const ConfigSchema = z.object( {
   proxy: z.url( 'Proxy URL must be a valid URL' ).optional().describe( 'URL of the proxy server to forward requests to' ),
+  spoofer: SpooferSchema,
   '$schema': z.url( 'Not a valid $schema URL' ).describe( 'URL to the JSON Schema that this configuration adheres to' ),
   'state-adapter': StateAdapterSchema.describe( 'Storage backend for state management - redis, memory, or { redis_url: string }' ),
   rateLimit: RateLimitSchema.describe( 'Global rate limit applied to all models unless individualLimit is true' ),

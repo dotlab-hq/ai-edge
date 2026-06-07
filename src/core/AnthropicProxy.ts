@@ -15,6 +15,7 @@ import { codeInterpreterHandler } from './CodeInterpreterHandler';
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
+import { applySpoofHeaders } from '@/utils/spoofer';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -513,6 +514,10 @@ export class AnthropicProxy {
       headers['Accept-Encoding'] = 'identity';
       headers.Connection = 'keep-alive';
       headers['Cache-Control'] = 'no-cache';
+    }
+
+    if ( CONFIG.spoofer === true ) {
+      return applySpoofHeaders( headers );
     }
 
     return headers;

@@ -21,6 +21,7 @@ import {
 import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
+import { applySpoofHeaders } from '@/utils/spoofer';
 import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 import {
     convertResponsesRequestToChat,
@@ -1970,11 +1971,15 @@ export class OpenAIProxy {
     }
 
     private buildHeaders( config: OpenAIModelConfig ): Record<string, string> {
-        return {
+        const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${config.apiKey}`,
             'User-Agent': 'ai-edge/1.0',
         };
+        if ( CONFIG.spoofer === true ) {
+            return applySpoofHeaders( headers );
+        }
+        return headers;
     }
 
     private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {

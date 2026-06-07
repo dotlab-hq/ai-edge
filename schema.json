@@ -7,6 +7,11 @@
       "type": "string",
       "format": "uri"
     },
+    "spoofer": {
+      "default": false,
+      "description": "If true, randomly generated IP spoofing headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP, etc.) are added to every upstream request",
+      "type": "boolean"
+    },
     "$schema": {
       "type": "string",
       "format": "uri",
@@ -968,6 +973,7 @@
     }
   },
   "required": [
+    "spoofer",
     "$schema",
     "state-adapter",
     "models"
