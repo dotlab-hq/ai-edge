@@ -132,6 +132,14 @@ app.get( '/', async ( c ) => {
     return c.json( data )
 } )
 
+app.get( '/health', ( c ) => {
+    return c.json( {
+        status: 'ok',
+        uptimeSeconds: Math.floor( process.uptime() ),
+        timestamp: new Date().toISOString(),
+    } );
+} )
+
 app.get( '/stats', async ( c ) => {
     await loadStats();
     return c.json( cachedStats )
