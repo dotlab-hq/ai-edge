@@ -459,6 +459,8 @@ export interface ResponsesStreamState {
     firstEmissionLogged: boolean;
     textItems: Array<{ itemId: string; text: string }>;
     toolCalls: Array<{ id: string; name: string; arguments: string }>;
+    reasoningItems: Array<{ itemId: string; text: string }>;
+    currentReasoningBlockOpen: boolean;
 }
 
 export function createResponsesStreamState( request: ResponsesRequest, requestStartedAt: number ): ResponsesStreamState {
@@ -479,6 +481,8 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         firstEmissionLogged: false,
         textItems: [],
         toolCalls: [],
+        reasoningItems: [],
+        currentReasoningBlockOpen: false,
     };
 }
 
@@ -553,10 +557,47 @@ export function processChatStreamChunkForResponses(
 
     // Handle text content
     if ( delta ) {
+        // Handle reasoning content (DeepSeek sends delta.reasoning_content, others may use delta.reasoning/delta.thinking)
+        const reasoningContent = ( delta.reasoning_content ?? delta.reasoning ?? delta.thinking ) as string | undefined;
+        if ( typeof reasoningContent === 'string' && reasoningContent.length > 0 ) {
+            if ( !state.currentReasoningBlockOpen ) {
+                const itemId = generateId( 'reason' );
+                state.reasoningItems.push( { itemId, text: reasoningContent } );
+                emitResponsesEvent( out, 'response.output_item.added', {
+                    type: 'response.output_item.added',
+                    output_index: state.currentOutputIndex,
+                    item: {
+                        type: 'reasoning',
+                        id: itemId,
+                        summary: [],
+                    },
+                } );
+                emitResponsesEvent( out, 'response.content_part.added', {
+                    type: 'response.content_part.added',
+                    output_index: state.currentOutputIndex,
+                    content_index: state.contentBlockIndex,
+                    part: { type: 'reasoning_summary', text: '' },
+                } );
+                state.currentReasoningBlockOpen = true;
+            } else {
+                const last = state.reasoningItems[state.reasoningItems.length - 1];
+                if ( last ) last.text += reasoningContent;
+            }
+
+            emitResponsesEvent( out, 'response.reasoning_summary_text.delta', {
+                type: 'response.reasoning_summary_text.delta',
+                output_index: state.currentOutputIndex,
+                content_index: state.contentBlockIndex,
+                delta: reasoningContent,
+            } );
+        }
+
         const content = delta.content as string | undefined;
 
         if ( typeof content === 'string' && content.length > 0 ) {
             if ( !state.currentTextBlockOpen ) {
+                // Close reasoning block before starting text — prevents index collision
+                closeReasoningBlock( state, out );
                 // Track text item for cache
                 const itemId = generateId( 'msg' );
                 state.textItems.push( { itemId, text: content } );
@@ -623,6 +664,8 @@ export function processChatStreamChunkForResponses(
     // because some providers send finish_reason in a separate chunk
     // without any content delta.
     if ( finishReason && finishReason !== 'null' ) {
+        // Close reasoning block if open
+        closeReasoningBlock( state, out );
         // Close text block if open
         if ( state.currentTextBlockOpen ) {
             const lastTextItem = state.textItems[state.textItems.length - 1];
@@ -658,9 +701,32 @@ export function processChatStreamChunkForResponses(
     return false;
 }
 
+function closeReasoningBlock( state: ResponsesStreamState, out: string[] ): void {
+    if ( !state.currentReasoningBlockOpen ) return;
+    const lastItem = state.reasoningItems[state.reasoningItems.length - 1];
+    const accumulatedText = lastItem?.text ?? '';
+    emitResponsesEvent( out, 'response.content_part.done', {
+        type: 'response.content_part.done',
+        output_index: state.currentOutputIndex,
+        content_index: state.contentBlockIndex,
+        part: { type: 'reasoning_summary', text: accumulatedText },
+    } );
+    emitResponsesEvent( out, 'response.output_item.done', {
+        type: 'response.output_item.done',
+        output_index: state.currentOutputIndex,
+        item: { type: 'reasoning', id: lastItem?.itemId ?? '', summary: [{ type: 'summary_text', text: accumulatedText }] },
+    } );
+    state.currentOutputIndex++;
+    state.contentBlockIndex = 0;
+    state.currentReasoningBlockOpen = false;
+}
+
 function finishResponsesStream( state: ResponsesStreamState, out: string[] ): void {
     if ( state.finished ) return;
     state.finished = true;
+
+    // Close any lingering reasoning block first
+    closeReasoningBlock( state, out );
 
     // Close any lingering text block — include accumulated text in content_part.done
     if ( state.currentTextBlockOpen ) {
@@ -749,6 +815,17 @@ export function emitResponsesDoneSentinel( out: string[] ): void {
 export function emitResponsesCompleted( state: ResponsesStreamState, out: string[] ): void {
     const output: any[] = [];
 
+    // Reasoning output items
+    for ( const ri of state.reasoningItems ) {
+        output.push( {
+            type: 'reasoning',
+            id: ri.itemId,
+            summary: ri.text
+                ? [ { type: 'summary_text', text: ri.text } ]
+                : [],
+        } );
+    }
+
     // Text output items
     for ( const ti of state.textItems ) {
         output.push( {
@@ -828,6 +905,16 @@ export function emitResponsesCompleted( state: ResponsesStreamState, out: string
  */
 export function buildStreamOutputItems( state: ResponsesStreamState ): any[] {
     const output: any[] = [];
+    // Reasoning items first
+    for ( const ri of state.reasoningItems ) {
+        output.push( {
+            type: 'reasoning',
+            id: ri.itemId,
+            summary: ri.text
+                ? [ { type: 'summary_text', text: ri.text } ]
+                : [],
+        } );
+    }
     for ( const ti of state.textItems ) {
         output.push( {
             type: 'message',

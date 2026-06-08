@@ -320,6 +320,12 @@ async function handleResponseCreate( conn: WSConnection, msg: any ): Promise<voi
     }
 
     // ── Find upstream backend ──
+    // Force streaming on the upstream request so we get chunks instead of
+    // buffering the entire response. The streaming path in
+    // streamUpstreamToWebSocket forwards each chunk to the client in real-time.
+    chatBody.stream = true;
+    chatBody.stream_options = { include_usage: true };
+
     console.info( `[ws:responses] upstream_request model=${model} messages=${chatBody.messages?.length ?? 0} tools=${chatBody.tools?.length ?? 0} prevId=${prevId ?? 'none'}` );
     console.info( `[ws:responses] fullInput types=${fullInput.map( ( i: any ) => i.type ?? i.role ?? '?' ).join( ',' )}` );
     // Log message roles and tool_call_ids for debugging
@@ -332,6 +338,7 @@ async function handleResponseCreate( conn: WSConnection, msg: any ): Promise<voi
     const result = await openAIProxy.processUpstreamWithFallback( chatBody, 'chat/completions', {
         responseId,
         model,
+        stream: true,
     } );
 
     if ( !result.response ) {

@@ -1,7 +1,8 @@
 const DEFAULT_COOLDOWN_MS = 5_000;
+const AUTH_FAIL_COOLDOWN_MS = 60_000;
 
 export function isRetryableUpstreamStatus( status: number ): boolean {
-    return status === 429 || ( status >= 500 && status <= 599 );
+    return status === 401 || status === 429 || ( status >= 500 && status <= 599 );
 }
 
 export class BackendCooldownManager {
@@ -9,11 +10,12 @@ export class BackendCooldownManager {
 
     constructor( private readonly defaultCooldownMs: number = DEFAULT_COOLDOWN_MS ) { }
 
-    markFromStatus( providerId: string, modelName: string, status: number, cooldownMs: number = this.defaultCooldownMs ): boolean {
+    markFromStatus( providerId: string, modelName: string, status: number, cooldownMs?: number ): boolean {
         if ( !isRetryableUpstreamStatus( status ) ) {
             return false;
         }
-        this.markCooldown( providerId, modelName, cooldownMs );
+        const effective = cooldownMs ?? ( status === 401 ? AUTH_FAIL_COOLDOWN_MS : this.defaultCooldownMs );
+        this.markCooldown( providerId, modelName, effective );
         return true;
     }
 
