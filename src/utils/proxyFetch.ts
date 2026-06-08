@@ -6,9 +6,9 @@ const originAgentCache = new Map<string, Agent>();
 const DEFAULT_TIMEOUT_MS = 180_000;        // 3 min (was 45s — too short for large LLM responses)
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 120_000;
 const DEFAULT_KEEP_ALIVE_MAX_TIMEOUT_MS = 600_000;
-const DEFAULT_CONNECTIONS_PER_ORIGIN = 16;
+const DEFAULT_CONNECTIONS_PER_ORIGIN = 4;
 const CACHE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_CACHE_SIZE = 100;
+const MAX_CACHE_SIZE = 16;
 const KEEP_ALIVE_ENABLE_MS = 30_000;
 
 // Start periodic cleanup of agent caches

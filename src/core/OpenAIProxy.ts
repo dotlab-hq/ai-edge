@@ -2802,6 +2802,7 @@ export class OpenAIProxy {
                     backendCooldownManager.markFromStatus( config.id, selectedModel, upstreamResponse.status );
                     if ( upstreamResponse.status === 429 ) {
                         this.providerStats.recordFailure( config.id, selectedModel );
+                        console.warn( `[ws:${endpoint}] 429 from ${config.id}, trying next backend` );
                         continue;
                     }
 
@@ -2815,6 +2816,13 @@ export class OpenAIProxy {
                                 );
                             }
                         }
+                    }
+
+                    // Non-2xx (401, 403, 500, etc.) — skip to next backend
+                    if ( !upstreamResponse.ok ) {
+                        this.providerStats.recordFailure( config.id, selectedModel );
+                        console.error( `[ws:${endpoint}] ${upstreamResponse.status} from ${config.id} — trying next backend` );
+                        continue;
                     }
 
                     this.providerStats.recordSuccess( config.id, selectedModel );

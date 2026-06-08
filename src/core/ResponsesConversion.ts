@@ -304,7 +304,7 @@ function convertToolsToChat( tools?: Array<Record<string, unknown>> ): ChatTool[
         } )
         .map( ( tool ) => {
             const fn = ( tool.function ?? tool ) as Record<string, unknown>;
-            return {
+            const entry: ChatTool = {
                 type: 'function' as const,
                 function: {
                     name: ( fn.name as string ) || '',
@@ -312,9 +312,10 @@ function convertToolsToChat( tools?: Array<Record<string, unknown>> ): ChatTool[
                     parameters: typeof fn.parameters === 'object' && fn.parameters !== null
                         ? fn.parameters as Record<string, unknown>
                         : undefined,
-                    strict: typeof fn.strict === 'boolean' ? fn.strict : true,
                 },
             };
+            if ( typeof fn.strict === 'boolean' ) entry.function.strict = fn.strict;
+            return entry;
         } );
 }
 
@@ -624,13 +625,15 @@ export function processChatStreamChunkForResponses(
     if ( finishReason && finishReason !== 'null' ) {
         // Close text block if open
         if ( state.currentTextBlockOpen ) {
+            const lastTextItem = state.textItems[state.textItems.length - 1];
+            const accumulatedText = lastTextItem?.text ?? '';
             emitResponsesEvent( out, 'response.content_part.done', {
                 type: 'response.content_part.done',
                 output_index: state.currentOutputIndex,
                 content_index: state.contentBlockIndex,
                 part: {
                     type: 'output_text',
-                    text: '',
+                    text: accumulatedText,
                 },
             } );
             emitResponsesEvent( out, 'response.output_item.done', {
@@ -659,13 +662,15 @@ function finishResponsesStream( state: ResponsesStreamState, out: string[] ): vo
     if ( state.finished ) return;
     state.finished = true;
 
-    // Close any lingering text block
+    // Close any lingering text block — include accumulated text in content_part.done
     if ( state.currentTextBlockOpen ) {
+        const lastTextItem = state.textItems[state.textItems.length - 1];
+        const accumulatedText = lastTextItem?.text ?? '';
         emitResponsesEvent( out, 'response.content_part.done', {
             type: 'response.content_part.done',
             output_index: state.currentOutputIndex,
             content_index: state.contentBlockIndex,
-            part: { type: 'output_text', text: '' },
+            part: { type: 'output_text', text: accumulatedText },
         } );
         emitResponsesEvent( out, 'response.output_item.done', {
             type: 'response.output_item.done',
@@ -677,9 +682,20 @@ function finishResponsesStream( state: ResponsesStreamState, out: string[] ): vo
         state.currentTextBlockOpen = false;
     }
 
-    // Emit output_item.done for any accumulated tool calls
+    // Emit full lifecycle for any accumulated tool calls
     for ( const tc of state.toolCalls ) {
         if ( !tc.id ) continue;
+        emitResponsesEvent( out, 'response.output_item.added', {
+            type: 'response.output_item.added',
+            output_index: state.currentOutputIndex,
+            item: {
+                type: 'function_call',
+                id: tc.id,
+                call_id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments,
+            },
+        } );
         emitResponsesEvent( out, 'response.output_item.done', {
             type: 'response.output_item.done',
             output_index: state.currentOutputIndex,
