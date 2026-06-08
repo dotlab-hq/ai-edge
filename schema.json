@@ -306,6 +306,27 @@
       },
       "additionalProperties": false
     },
+    "vectorStore": {
+      "description": "Vector store proxy configuration — forwards /v1/vector_stores and /v1/files requests to the target. Check out https://github.com/dotlab-hq/vector-store! :)",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the vector store API to proxy requests to"
+        },
+        "apiKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "API key sent as Authorization header to the vector store"
+        }
+      },
+      "required": [
+        "url",
+        "apiKey"
+      ],
+      "additionalProperties": false
+    },
     "models": {
       "type": "object",
       "properties": {

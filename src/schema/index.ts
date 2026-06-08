@@ -218,6 +218,11 @@ const CodeInterpreterSchema = z.object( {
   initialFiles: z.record( z.string(), z.string( { error: 'initialFiles values must be strings' } ) ).optional(),
 } ).strict()
 
+const VectorStoreSchema = z.object( {
+  url: z.url( 'vectorStore.url must be a valid URL' ).describe( 'Base URL of the vector store API to proxy requests to' ),
+  apiKey: z.string( { error: 'vectorStore.apiKey is required' } ).min( 1, 'vectorStore.apiKey cannot be empty' ).describe( 'API key sent as Authorization header to the vector store' ),
+} ).strict().optional().describe( 'Vector store proxy configuration — forwards /v1/vector_stores and /v1/files requests to the target. Check out https://github.com/dotlab-hq/vector-store! :)' )
+
 const ToolsSchema = z.object( {
   webSearch: WebSearchSchema.describe( 'Optional built-in web search providers used to satisfy OpenAI and Anthropic web search tool requests' ),
   code_interpreter: CodeInterpreterSchema.optional().describe( 'Alias for codeInterpreter (optional code interpreter provider)' ),
@@ -230,6 +235,7 @@ export const ConfigSchema = z.object( {
   'state-adapter': StateAdapterSchema.describe( 'Storage backend for state management - redis, memory, or { redis_url: string }' ),
   rateLimit: RateLimitSchema.describe( 'Global rate limit applied to all models unless individualLimit is true' ),
   tools: ToolsSchema.describe( 'Optional built-in proxy tools such as web search' ),
+  vectorStore: VectorStoreSchema,
   models: z.object( {
     openai: z.array( OpenAIModelSchema ).min( 1, 'At least one OpenAI config is required' ).optional().describe( 'OpenAI provider configurations. If omitted, no OpenAI models will be available' ),
     anthropic: z.array( AnthropicModelSchema ).min( 1, 'At least one Anthropic config is required' ).optional().describe( 'Anthropic provider configurations. If omitted, no Anthropic models will be available' ),
