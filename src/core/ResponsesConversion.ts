@@ -401,13 +401,20 @@ export function convertChatResponseToResponses(
             }],
         } );
     } else if ( !message?.tool_calls?.length ) {
-        // Empty response — still emit a message item
+        // When there's no text content but reasoning is present (model spent
+        // all its budget on reasoning), surface the reasoning text so the
+        // output array is never empty — clients expect at least one message.
+        const reasoningText = ( message as any )?.reasoning_content
+            || ( message as any )?.reasoning
+            || ( message as any )?.thinking;
         output.push( {
             type: 'message',
             id: generateId( 'msg' ),
             role: 'assistant',
             status: 'completed',
-            content: [],
+            content: reasoningText
+                ? [{ type: 'output_text', text: reasoningText, annotations: [] }]
+                : [],
         } );
     }
 
@@ -847,6 +854,21 @@ export function emitResponsesCompleted( state: ResponsesStreamState, out: string
             call_id: tc.id,
             name: tc.name,
             arguments: tc.arguments,
+        } );
+    }
+
+    // When there are reasoning items but no text items, emit a message output
+    // item with the reasoning text so clients always get at least one message.
+    if ( state.reasoningItems.length > 0 && state.textItems.length === 0 && state.toolCalls.length === 0 ) {
+        const reasoningText = state.reasoningItems.map( ri => ri.text ).join( '' );
+        output.push( {
+            type: 'message',
+            id: generateId( 'msg' ),
+            role: 'assistant',
+            status: 'completed',
+            content: reasoningText
+                ? [ { type: 'output_text', text: reasoningText, annotations: [] } ]
+                : [],
         } );
     }
 

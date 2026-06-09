@@ -975,7 +975,12 @@ export class OpenAIProxy {
         }
 
         // Track whether Codex expects SSE events (Responses API + streaming)
-        const isStreamingResponses = endpoint === 'responses' && body.stream === true;
+        // Note: endpoint is always 'chat/completions' when coming from the
+        // Responses path (the body is converted before entering proxyRequest),
+        // so we check originalResponsesBody instead.
+        const isResponsesApi = !!originalResponsesBody;
+        const originalStreamFlag = originalResponsesBody?.stream === true || body.stream === true;
+        const isStreamingResponses = isResponsesApi && originalStreamFlag;
 
         const matchingBackends = this.getBackendsForModel( modelName, endpoint );
         if ( !matchingBackends.length ) {
@@ -988,10 +993,11 @@ export class OpenAIProxy {
                 return this.sendResponsesStreamError( modelName, `Model not found: ${modelName}` );
             }
 
-            // Responses-API request that was converted to chat/completions also
-            // needs SSE error so Codex doesn't hang.
+            // Responses API non-streaming: return JSON error.
             if ( originalResponsesBody ) {
-                return this.sendResponsesStreamError( modelName, `Model not found: ${modelName}` );
+                return c.json( {
+                    error: { message: `Model not found: ${modelName}`, type: 'invalid_request_error' },
+                }, 400 );
             }
 
             return c.json( {
@@ -1080,12 +1086,36 @@ export class OpenAIProxy {
                         };
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name} — skipping streaming path` );
-                        // For Responses API streaming, emit an SSE error so
-                        // the client doesn't hang waiting for response.completed.
-                        if ( originalResponsesBody ) {
+                        // For streaming Responses API, emit SSE error so the
+                        // client doesn't hang waiting for response.completed.
+                        if ( isStreamingResponses ) {
                             return this.sendResponsesStreamError( selectedModel, lastFailure.payload?.error?.message || `Upstream returned ${response.status}` );
                         }
                         continue;
+                    }
+
+                    // Some upstreams return HTTP 200 with a JSON error body
+                    // even when stream=true. Detect via content-type so we
+                    // don't try to parse JSON as SSE.
+                    const responseContentType = response.headers.get( 'content-type' ) ?? '';
+                    if ( upstreamBody.stream === true && responseContentType.includes( 'application/json' ) ) {
+                        const errorPayload = await this.parseResponsePayload( response );
+                        if ( errorPayload?.type === 'error' || errorPayload?.error ) {
+                            const errorMsg = errorPayload?.error?.message || errorPayload?.error || JSON.stringify( errorPayload );
+                            lastFailure = {
+                                status: 200,
+                                payload: errorPayload,
+                            };
+                            this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+                            console.error( `[${endpoint}] upstream_error_in_body(stream) from ${config?.id ?? config?.name}: ${typeof errorMsg === 'string' ? errorMsg.slice( 0, 200 ) : JSON.stringify( errorMsg ).slice( 0, 200 )}` );
+                            if ( originalResponsesBody ) {
+                                return this.sendResponsesStreamError( selectedModel, typeof errorMsg === 'string' ? errorMsg : JSON.stringify( errorMsg ) );
+                            }
+                            continue;
+                        }
+                        // Non-error JSON response in streaming — unusual but
+                        // fall through to let the normal non-streaming path
+                        // handle it below.
                     }
 
                     // Handle streaming responses
@@ -1191,6 +1221,20 @@ export class OpenAIProxy {
                         continue;
                     }
 
+                    // Some upstreams return HTTP 200 with an error payload
+                    // (e.g. {"type":"error","error":{"type":"ModelError",...}}).
+                    // Detect and treat as a failure so we try the next backend.
+                    if ( payload?.type === 'error' || ( payload?.error && !payload?.choices ) ) {
+                        const errorMsg = payload?.error?.message || payload?.error || JSON.stringify( payload );
+                        lastFailure = {
+                            status: 200,
+                            payload,
+                        };
+                        this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+                        console.error( `[${endpoint}] upstream_error_in_body from ${config?.id ?? config?.name}: ${typeof errorMsg === 'string' ? errorMsg.slice( 0, 200 ) : JSON.stringify( errorMsg ).slice( 0, 200 )}` );
+                        continue;
+                    }
+
                     // Convert chat/completions response back to Responses format if needed
                     let finalPayload = payload;
                     if ( originalResponsesBody ) {
@@ -1241,14 +1285,19 @@ export class OpenAIProxy {
             console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
             console.info( `[${endpoint}] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt}` );
 
-            // For Responses API with streaming, return SSE error so Codex doesn't hang
+            // Responses API streaming: return SSE error so client doesn't hang.
             if ( isStreamingResponses ) {
                 return this.sendResponsesStreamError( modelName, typeof lastFailure.payload === 'object' ? lastFailure.payload?.error?.message || JSON.stringify( lastFailure.payload ) : String( lastFailure.payload ) );
             }
 
-            // Responses-API request (converted to chat) also needs SSE error
+            // Responses API non-streaming: return JSON error.
             if ( originalResponsesBody ) {
-                return this.sendResponsesStreamError( modelName, typeof lastFailure.payload === 'object' ? lastFailure.payload?.error?.message || JSON.stringify( lastFailure.payload ) : String( lastFailure.payload ) );
+                return c.json( {
+                    error: {
+                        message: typeof lastFailure.payload === 'object' ? lastFailure.payload?.error?.message || 'Upstream request failed' : String( lastFailure.payload ),
+                        type: 'upstream_error',
+                    },
+                }, 502 );
             }
 
             return this.sendFailurePayload( c, lastFailure.status, lastFailure.payload );
@@ -1257,14 +1306,19 @@ export class OpenAIProxy {
         console.error( `\n❌ [${endpoint}] ALL PROVIDERS FAILED - No response from any backend\nModel: ${modelName}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
         console.info( `[${endpoint}] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt}` );
 
-        // For Responses API with streaming, return SSE error so Codex doesn't hang
+        // Responses API streaming: return SSE error so client doesn't hang.
         if ( isStreamingResponses ) {
             return this.sendResponsesStreamError( modelName, 'All providers failed' );
         }
 
-        // Responses-API request (converted to chat) also needs SSE error
+        // Responses API non-streaming: return JSON error.
         if ( originalResponsesBody ) {
-            return this.sendResponsesStreamError( modelName, 'All providers failed' );
+            return c.json( {
+                error: {
+                    message: 'All providers failed',
+                    type: 'upstream_error',
+                },
+            }, 502 );
         }
 
         return c.json( {
