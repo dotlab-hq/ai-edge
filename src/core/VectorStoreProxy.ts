@@ -8,10 +8,6 @@ export class VectorStoreProxy {
 
     constructor() {
         this.app = new Hono();
-        this.app.all( '/vector_stores/*', ( c ) => this.proxy( c ) );
-        this.app.all( '/vector_stores', ( c ) => this.proxy( c ) );
-        this.app.all( '/files/*', ( c ) => this.proxy( c ) );
-        this.app.all( '/files', ( c ) => this.proxy( c ) );
         this.app.all( '/v1/vector_stores/*', ( c ) => this.proxy( c ) );
         this.app.all( '/v1/vector_stores', ( c ) => this.proxy( c ) );
         this.app.all( '/v1/files/*', ( c ) => this.proxy( c ) );
@@ -34,7 +30,8 @@ export class VectorStoreProxy {
 
         try {
             const base = vs.url.replace( /\/+$/, '' );
-            const url = `${base}${c.req.path}`;
+            const upstreamPath = c.req.path.replace( /^\/v1/, '' ) || '/';
+            const url = `${base}${upstreamPath}`;
             const method = c.req.method;
             const headers: Record<string, string> = {
                 'Authorization': `Bearer ${vs.apiKey}`,
