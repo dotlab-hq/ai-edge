@@ -128,9 +128,17 @@ export function convertResponsesRequestToChat( request: ResponsesRequest ): Chat
     const reasoningEffort = resolveReasoningEffort( request );
     if ( reasoningEffort ) chatRequest.reasoning_effort = reasoningEffort;
 
-    // Carry through any extra fields not explicitly mapped
+    // ── Responses-only fields that must NOT leak into chat/completions ──
+    const RESPONSES_ONLY_FIELDS = new Set<string>( [
+        'input',
+        'instructions',
+        'reasoning',
+        'max_output_tokens',
+    ] );
+
+    // Carry through any extra fields not explicitly mapped (skip Responses-only fields)
     for ( const [key, value] of Object.entries( request ) ) {
-        if ( !( key in chatRequest ) && value !== undefined ) {
+        if ( !( key in chatRequest ) && value !== undefined && !RESPONSES_ONLY_FIELDS.has( key ) ) {
             ( chatRequest as Record<string, unknown> )[key] = value;
         }
     }
@@ -366,11 +374,25 @@ function resolveReasoningEffort( request: ResponsesRequest ): string | undefined
 export function convertChatResponseToResponses(
     chatResponse: ChatCompletionResponse,
     originalRequest: ResponsesRequest,
+    fileSearchCalls?: FileSearchCallItem[],
 ): Record<string, unknown> {
     const choice = chatResponse.choices?.[0];
     const message = choice?.message;
 
     const output: ResponsesOutputItem[] = [];
+
+    // File search call output items (prepend before other items)
+    if ( Array.isArray( fileSearchCalls ) ) {
+        for ( const fsc of fileSearchCalls ) {
+            output.push( {
+                type: 'file_search_call',
+                id: fsc.id,
+                status: fsc.status,
+                queries: fsc.queries,
+                ...( fsc.results ? { results: fsc.results } : {} ),
+            } as ResponsesOutputItem );
+        }
+    }
 
     // Tool calls → function_call output items
     if ( Array.isArray( message?.tool_calls ) ) {
@@ -402,18 +424,16 @@ export function convertChatResponseToResponses(
         } );
     } else if ( !message?.tool_calls?.length ) {
         // When there's no text content but reasoning is present (model spent
-        // all its budget on reasoning), surface the reasoning text so the
-        // output array is never empty — clients expect at least one message.
+        // all its budget on reasoning), surface it as a reasoning item so
+        // the output array is never empty.
         const reasoningText = ( message as any )?.reasoning_content
             || ( message as any )?.reasoning
             || ( message as any )?.thinking;
         output.push( {
-            type: 'message',
-            id: generateId( 'msg' ),
-            role: 'assistant',
-            status: 'completed',
-            content: reasoningText
-                ? [{ type: 'output_text', text: reasoningText, annotations: [] }]
+            type: 'reasoning',
+            id: generateId( 'rs' ),
+            summary: reasoningText
+                ? [{ type: 'summary_text', text: reasoningText }]
                 : [],
         } );
     }
@@ -434,20 +454,32 @@ export function convertChatResponseToResponses(
         : buildEmptyUsage();
 
     return {
-        id: chatResponse.id || generateId( 'resp' ),
+        id: generateId( 'resp' ),
         object: 'response',
         created: chatResponse.created ?? Math.floor( Date.now() / 1000 ),
         model: originalRequest.model,
         output,
         usage,
         status: 'completed',
-        ...( chatResponse.system_fingerprint ? { system_fingerprint: chatResponse.system_fingerprint } : {} ),
     };
 }
 
 // ────────────────────────────────────────────────────────────────
 // Streaming: Chat Completions SSE → Responses SSE
 // ────────────────────────────────────────────────────────────────
+
+export interface FileSearchCallItem {
+    id: string;
+    queries: string[];
+    status: 'completed' | 'failed';
+    results?: Array<{
+        file_id: string;
+        filename?: string;
+        text?: string;
+        score?: number;
+        attributes?: Record<string, string | number | boolean>;
+    }>;
+}
 
 export interface ResponsesStreamState {
     responseId: string;
@@ -468,6 +500,7 @@ export interface ResponsesStreamState {
     toolCalls: Array<{ id: string; name: string; arguments: string }>;
     reasoningItems: Array<{ itemId: string; text: string }>;
     currentReasoningBlockOpen: boolean;
+    fileSearchCalls: FileSearchCallItem[];
 }
 
 export function createResponsesStreamState( request: ResponsesRequest, requestStartedAt: number ): ResponsesStreamState {
@@ -490,6 +523,7 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         toolCalls: [],
         reasoningItems: [],
         currentReasoningBlockOpen: false,
+        fileSearchCalls: [],
     };
 }
 
@@ -514,6 +548,35 @@ export function emitResponsesStreamPreamble( state: ResponsesStreamState, out: s
             status: 'in_progress',
         },
     } );
+
+    // Emit file_search_call items BEFORE any reasoning/text output so they
+    // get the correct output_index order (file_search → reasoning → text).
+    for ( const fsc of state.fileSearchCalls ) {
+        emitResponsesEvent( out, 'response.output_item.added', {
+            type: 'response.output_item.added',
+            output_index: state.currentOutputIndex,
+            item: {
+                type: 'file_search_call',
+                id: fsc.id,
+                status: fsc.status,
+                queries: fsc.queries,
+                ...( fsc.results ? { results: fsc.results } : {} ),
+            },
+        } );
+        emitResponsesEvent( out, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: state.currentOutputIndex,
+            item: {
+                type: 'file_search_call',
+                id: fsc.id,
+                status: fsc.status,
+                queries: fsc.queries,
+                ...( fsc.results ? { results: fsc.results } : {} ),
+            },
+        } );
+        state.currentOutputIndex++;
+    }
+
     state.hasEmittedResponse = true;
 }
 
@@ -822,6 +885,17 @@ export function emitResponsesDoneSentinel( out: string[] ): void {
 export function emitResponsesCompleted( state: ResponsesStreamState, out: string[] ): void {
     const output: any[] = [];
 
+    // File search call output items (before text items)
+    for ( const fsc of state.fileSearchCalls ) {
+        output.push( {
+            type: 'file_search_call',
+            id: fsc.id,
+            status: fsc.status,
+            queries: fsc.queries,
+            ...( fsc.results ? { results: fsc.results } : {} ),
+        } );
+    }
+
     // Reasoning output items
     for ( const ri of state.reasoningItems ) {
         output.push( {
@@ -857,18 +931,15 @@ export function emitResponsesCompleted( state: ResponsesStreamState, out: string
         } );
     }
 
-    // When there are reasoning items but no text items, emit a message output
-    // item with the reasoning text so clients always get at least one message.
-    if ( state.reasoningItems.length > 0 && state.textItems.length === 0 && state.toolCalls.length === 0 ) {
-        const reasoningText = state.reasoningItems.map( ri => ri.text ).join( '' );
+    // Fallback: when there's no message or reasoning output, emit a minimal
+    // message so the response always has content.
+    if ( output.length === 0 ) {
         output.push( {
             type: 'message',
             id: generateId( 'msg' ),
             role: 'assistant',
             status: 'completed',
-            content: reasoningText
-                ? [ { type: 'output_text', text: reasoningText, annotations: [] } ]
-                : [],
+            content: [],
         } );
     }
 
@@ -927,7 +998,17 @@ export function emitResponsesCompleted( state: ResponsesStreamState, out: string
  */
 export function buildStreamOutputItems( state: ResponsesStreamState ): any[] {
     const output: any[] = [];
-    // Reasoning items first
+    // File search call items first
+    for ( const fsc of state.fileSearchCalls ) {
+        output.push( {
+            type: 'file_search_call',
+            id: fsc.id,
+            status: fsc.status,
+            queries: fsc.queries,
+            ...( fsc.results ? { results: fsc.results } : {} ),
+        } );
+    }
+    // Reasoning items
     for ( const ri of state.reasoningItems ) {
         output.push( {
             type: 'reasoning',

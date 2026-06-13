@@ -40,3 +40,5 @@ model.toml
 
 # cloned repos
 codex/
+
+mcp.json

@@ -6,6 +6,7 @@ import {
     processChatStreamChunkForResponses,
     buildStreamOutputItems,
     sseEventsToWsFrames,
+    type FileSearchCallItem,
 } from '../src/core/ResponsesConversion';
 
 function parseEvents( out: string[] ): Array<{ type: string; data: any }> {
@@ -411,4 +412,201 @@ test( 'sseEventsToWsFrames extracts JSON from SSE format', () => {
     expect( frames ).toHaveLength( 2 );
     expect( JSON.parse( frames[0] ) ).toEqual( { type: 'response.created', response: {} } );
     expect( JSON.parse( frames[1] ).delta ).toBe( 'hi' );
+} );
+
+// ── file_search_call tests ──────────────────────────────────────
+
+test( 'file_search_call items appear in streaming output lifecycle', () => {
+    const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1 );
+    const out: string[] = [];
+
+    const fsc: FileSearchCallItem = {
+        id: 'fs_test1',
+        queries: ['what is foo?'],
+        status: 'completed',
+        results: [
+            { file_id: 'file-abc', filename: 'docs.md', text: 'Foo is a bar.', score: 0.95 },
+        ],
+    };
+    state.fileSearchCalls = [fsc];
+
+    // Emit a text chunk + finish
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, delta: { content: 'hello' } }] } as any,
+        state,
+        out,
+    );
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, finish_reason: 'stop' }] } as any,
+        state,
+        out,
+    );
+
+    const events = parseEvents( out );
+
+    // file_search_call output_item.added should appear with output_index 0
+    const fscAdded = events.filter(
+        e => e.type === 'response.output_item.added' && e.data.item?.type === 'file_search_call',
+    );
+    expect( fscAdded ).toHaveLength( 1 );
+    expect( fscAdded[0].data.output_index ).toBe( 0 );
+    expect( fscAdded[0].data.item.id ).toBe( 'fs_test1' );
+    expect( fscAdded[0].data.item.status ).toBe( 'completed' );
+    expect( fscAdded[0].data.item.results ).toHaveLength( 1 );
+    expect( fscAdded[0].data.item.results[0].filename ).toBe( 'docs.md' );
+
+    // file_search_call output_item.done should also appear
+    const fscDone = events.filter(
+        e => e.type === 'response.output_item.done' && e.data.item?.type === 'file_search_call',
+    );
+    expect( fscDone ).toHaveLength( 1 );
+    expect( fscDone[0].data.output_index ).toBe( 0 );
+
+    // Text message should be at output_index 1 (after file_search_call)
+    const msgAdded = events.filter(
+        e => e.type === 'response.output_item.added' && e.data.item?.type === 'message',
+    );
+    expect( msgAdded ).toHaveLength( 1 );
+    expect( msgAdded[0].data.output_index ).toBe( 1 );
+} );
+
+test( 'emitResponsesCompleted includes file_search_call in output', () => {
+    const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1 );
+    const out: string[] = [];
+
+    state.fileSearchCalls = [
+        {
+            id: 'fs_test2',
+            queries: ['search term'],
+            status: 'completed',
+            results: [
+                { file_id: 'file-xyz', filename: 'readme.txt', text: 'Content here', score: 0.8 },
+            ],
+        },
+    ];
+
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, delta: { content: 'answer' } }] } as any,
+        state,
+        out,
+    );
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, finish_reason: 'stop' }] } as any,
+        state,
+        out,
+    );
+
+    out.length = 0;
+    emitResponsesCompleted( state, out );
+
+    const events = parseEvents( out );
+    const completed = events.find( e => e.type === 'response.completed' );
+    const output = completed!.data.response.output;
+
+    // First item should be file_search_call
+    expect( output[0].type ).toBe( 'file_search_call' );
+    expect( output[0].id ).toBe( 'fs_test2' );
+    expect( output[0].results ).toHaveLength( 1 );
+
+    // Second item should be message
+    expect( output[1].type ).toBe( 'message' );
+    expect( output[1].content[0].text ).toBe( 'answer' );
+} );
+
+test( 'buildStreamOutputItems includes file_search_call items', () => {
+    const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1 );
+    const out: string[] = [];
+
+    state.fileSearchCalls = [
+        {
+            id: 'fs_test3',
+            queries: ['query'],
+            status: 'completed',
+            results: [
+                { file_id: 'f1', filename: 'a.md', text: 'hello', score: 1 },
+                { file_id: 'f2', filename: 'b.md', text: 'world', score: 0.5 },
+            ],
+        },
+    ];
+
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, delta: { content: 'result' } }] } as any,
+        state,
+        out,
+    );
+    processChatStreamChunkForResponses( null, state, out );
+
+    const items = buildStreamOutputItems( state );
+    expect( items[0].type ).toBe( 'file_search_call' );
+    expect( items[0].id ).toBe( 'fs_test3' );
+    expect( items[0].results ).toHaveLength( 2 );
+    expect( items[1].type ).toBe( 'message' );
+} );
+
+test( 'multiple file_search_calls are emitted in order', () => {
+    const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1 );
+    const out: string[] = [];
+
+    state.fileSearchCalls = [
+        { id: 'fs_a', queries: ['q1'], status: 'completed', results: [] },
+        { id: 'fs_b', queries: ['q2'], status: 'failed' },
+    ];
+
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, delta: { content: 'text' } }] } as any,
+        state,
+        out,
+    );
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, finish_reason: 'stop' }] } as any,
+        state,
+        out,
+    );
+
+    const events = parseEvents( out );
+    const fscAdded = events.filter(
+        e => e.type === 'response.output_item.added' && e.data.item?.type === 'file_search_call',
+    );
+    expect( fscAdded ).toHaveLength( 2 );
+    expect( fscAdded[0].data.item.id ).toBe( 'fs_a' );
+    expect( fscAdded[0].data.output_index ).toBe( 0 );
+    expect( fscAdded[1].data.item.id ).toBe( 'fs_b' );
+    expect( fscAdded[1].data.output_index ).toBe( 1 );
+
+    // Text should be at output_index 2
+    const msgAdded = events.filter(
+        e => e.type === 'response.output_item.added' && e.data.item?.type === 'message',
+    );
+    expect( msgAdded[0].data.output_index ).toBe( 2 );
+} );
+
+test( 'file_search_call without results still appears in output', () => {
+    const state = createResponsesStreamState( { model: 'gpt-5.4' } as any, 1 );
+    const out: string[] = [];
+
+    state.fileSearchCalls = [
+        { id: 'fs_empty', queries: ['nothing found'], status: 'completed' },
+    ];
+
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, delta: { content: 'ok' } }] } as any,
+        state,
+        out,
+    );
+    processChatStreamChunkForResponses(
+        { choices: [{ index: 0, finish_reason: 'stop' }] } as any,
+        state,
+        out,
+    );
+
+    out.length = 0;
+    emitResponsesCompleted( state, out );
+
+    const events = parseEvents( out );
+    const completed = events.find( e => e.type === 'response.completed' );
+    const output = completed!.data.response.output;
+
+    expect( output[0].type ).toBe( 'file_search_call' );
+    expect( output[0].id ).toBe( 'fs_empty' );
+    expect( output[0].results ).toBeUndefined();
 } );

@@ -30,7 +30,9 @@ import {
     processChatStreamChunkForResponses,
     emitResponsesCompleted,
     emitResponsesDoneSentinel,
+    type FileSearchCallItem,
 } from './ResponsesConversion';
+import { fileSearchManager, type FileSearchResponse } from './FileSearchManager';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -845,18 +847,24 @@ export class OpenAIProxy {
 
         // Convert Responses API body to chat/completions format for upstream backends
         if ( endpoint === 'responses' ) {
-            const converted = convertResponsesRequestToChat( normalizedBody );
-            return this.proxyRequest( c, 'chat/completions', 1, converted, normalizedBody );
+            // Intercept file_search tools: query vector store, inject context, strip tool
+            const fileSearchContext = await this.prepareFileSearchForResponses( normalizedBody );
+            const converted = convertResponsesRequestToChat( fileSearchContext.body );
+            return this.proxyRequest( c, 'chat/completions', 1, converted, normalizedBody, fileSearchContext.searchCalls );
         }
 
         return this.proxyRequest( c, endpoint, 1, normalizedBody );
     }
 
     public normalizeToolSearchForEndpoint( body: any, endpoint: string ): any {
-        if ( endpoint === 'responses' || !Array.isArray( body?.tools ) ) {
+        if ( !Array.isArray( body?.tools ) ) {
             return body;
         }
 
+        // Strip tool_search and defer_loading for all endpoints.
+        // For the responses endpoint, built-in tools like file_search and
+        // web_search_preview are still present in the tools array — they are
+        // intercepted and handled by their respective managers, not forwarded.
         const normalizedTools = body.tools
             .filter( ( tool: any ) => tool?.type !== 'tool_search' )
             .map( ( tool: any ) => this.removeDeferLoadingField( tool ) );
@@ -936,7 +944,7 @@ export class OpenAIProxy {
         return CONFIG.rateLimit;
     }
 
-    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1, rawBody?: any, originalResponsesBody?: any ): Promise<any> {
+    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1, rawBody?: any, originalResponsesBody?: any, fileSearchCalls?: FileSearchCallItem[] ): Promise<any> {
         const requestStartedAt = Date.now();
         let bodyParsedAt = requestStartedAt;
         let webSearchCompletedAt = requestStartedAt;
@@ -1142,7 +1150,7 @@ export class OpenAIProxy {
 
                             // Responses API: convert chat SSE chunks to Responses SSE format
                             if ( originalResponsesBody ) {
-                                return this.streamResponsesConverted( c, response, originalResponsesBody, config.id, selectedModel, requestStartedAt );
+                                return this.streamResponsesConverted( c, response, originalResponsesBody, config.id, selectedModel, requestStartedAt, fileSearchCalls );
                             }
 
                             return stream( c, async ( streamWriter ) => {
@@ -1238,7 +1246,7 @@ export class OpenAIProxy {
                     // Convert chat/completions response back to Responses format if needed
                     let finalPayload = payload;
                     if ( originalResponsesBody ) {
-                        finalPayload = convertChatResponseToResponses( payload, originalResponsesBody );
+                        finalPayload = convertChatResponseToResponses( payload, originalResponsesBody, fileSearchCalls );
                         // Ensure usage is present using chat body for token counting (Responses payload has responses-format usage)
                         finalPayload = this.attachUsageIfMissing( 'responses', originalResponsesBody, finalPayload );
                         if ( isDebugEnabled() ) {
@@ -1502,6 +1510,177 @@ export class OpenAIProxy {
                 citations: searchResponse.citations,
                 cached: searchResponse.cached,
             },
+        };
+    }
+
+    private async prepareFileSearchForResponses( body: any ): Promise<{
+        body: any;
+        searchCalls?: FileSearchCallItem[];
+    }> {
+        if ( !this.shouldUseFileSearch( body ) ) {
+            return { body };
+        }
+
+        if ( !fileSearchManager.isEnabled() ) {
+            console.warn( `[file-search] file_search tool requested but vector store is not configured — stripping tool` );
+            return { body: this.stripFileSearchTools( body ) };
+        }
+
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        const fileSearchTools = tools.filter( ( t: any ) => t?.type === 'file_search' );
+
+        const queries = this.extractFileSearchQueries( body );
+        if ( !queries.length ) {
+            console.warn( `[file-search] No queries derivable from input — stripping file_search tool` );
+            return { body: this.stripFileSearchTools( body ) };
+        }
+
+        // Collect all vector store IDs across all file_search tools
+        const vectorStoreIds: string[] = [];
+        for ( const tool of fileSearchTools ) {
+            const ids = Array.isArray( tool.vector_store_ids ) ? tool.vector_store_ids : [];
+            for ( const id of ids ) {
+                if ( typeof id === 'string' && !vectorStoreIds.includes( id ) ) {
+                    vectorStoreIds.push( id );
+                }
+            }
+        }
+
+        const maxResults = Math.max(
+            ...fileSearchTools.map( ( t: any ) => t?.max_num_results ?? 20 ),
+            20,
+        );
+
+        try {
+            const searchResponse = await fileSearchManager.search( queries, vectorStoreIds, { maxResults } );
+            const searchCallId = `fs_${Date.now().toString( 36 )}`;
+            const searchCall: FileSearchCallItem = {
+                id: searchCallId,
+                queries,
+                status: 'completed',
+                results: searchResponse.results,
+            };
+
+            // Inject search results as context and strip file_search tools
+            const enrichedBody = this.injectFileSearchContext( this.stripFileSearchTools( body ), queries, searchResponse );
+            return { body: enrichedBody, searchCalls: [searchCall] };
+        } catch ( err: any ) {
+            console.error( `[file-search] search_error error=${err?.message || String( err )}` );
+            return { body: this.stripFileSearchTools( body ) };
+        }
+    }
+
+    private shouldUseFileSearch( body: any ): boolean {
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        return tools.some( ( tool: any ) => tool?.type === 'file_search' );
+    }
+
+    private extractFileSearchQueries( body: any ): string[] {
+        // Derive queries from the input messages (last user message)
+        const inputItems = Array.isArray( body?.input ) ? body.input : ( body?.input ? [body.input] : [] );
+        const queries: string[] = [];
+
+        for ( let i = inputItems.length - 1; i >= 0; i-- ) {
+            const item = inputItems[i];
+            if ( !item || typeof item !== 'object' ) continue;
+
+            // EasyInputMessage / Message format
+            if ( item.role === 'user' || item.role === 'developer' ) {
+                const text = this.collectTextFromContent( item.content );
+                if ( text ) {
+                    queries.push( text );
+                    break;
+                }
+            }
+        }
+
+        // Fallback: try to extract any text from all input items
+        if ( !queries.length ) {
+            for ( const item of inputItems ) {
+                if ( !item || typeof item !== 'object' ) continue;
+                const text = this.collectTextFromContent( item.content );
+                if ( text ) {
+                    queries.push( text );
+                    break;
+                }
+            }
+        }
+
+        return queries.slice( 0, 5 );
+    }
+
+    private collectTextFromContent( content: unknown ): string {
+        if ( typeof content === 'string' ) return content.trim();
+        if ( !Array.isArray( content ) ) return '';
+        const parts: string[] = [];
+        for ( const block of content ) {
+            if ( !block || typeof block !== 'object' ) continue;
+            const t = block.type as string;
+            if ( ( t === 'input_text' || t === 'text' ) && typeof block.text === 'string' ) {
+                parts.push( block.text );
+            } else if ( typeof block.text === 'string' ) {
+                parts.push( block.text );
+            }
+        }
+        return parts.join( '\n' ).trim();
+    }
+
+    private stripFileSearchTools( body: any ): any {
+        if ( !Array.isArray( body?.tools ) ) return body;
+        return {
+            ...body,
+            tools: body.tools.filter( ( t: any ) => t?.type !== 'file_search' ),
+        };
+    }
+
+    private injectFileSearchContext( body: any, queries: string[], searchResponse: FileSearchResponse ): any {
+        const snippets = searchResponse.results.map( ( r, i ) => {
+            const fileRef = r.filename ? `[File: ${r.filename}]` : `[File ID: ${r.file_id}]`;
+            const score = typeof r.score === 'number' ? ` (score: ${r.score.toFixed( 2 )})` : '';
+            return `${fileRef}${score}\n${r.text}`;
+        } );
+
+        const fileSearchContext = [
+            `File search results for query: ${queries.join( '; ' )}`,
+            'Use these file excerpts as context when answering. Cite sources by filename when relevant.',
+            snippets.join( '\n\n---\n\n' ),
+        ].join( '\n\n' );
+
+        // For Responses API: inject as a system message in the input array
+        const inputItems = Array.isArray( body?.input )
+            ? [...body.input]
+            : ( body?.input ? [body.input] : [] );
+
+        inputItems.push( {
+            role: 'system',
+            content: [
+                {
+                    type: 'input_text',
+                    text: fileSearchContext,
+                },
+            ],
+        } );
+
+        return { ...body, input: inputItems };
+    }
+
+    private attachFileSearchMetadata( payload: any, searchCalls?: FileSearchCallItem[] ): any {
+        if ( !searchCalls || !searchCalls.length || !payload || typeof payload !== 'object' || Array.isArray( payload ) ) {
+            return payload;
+        }
+
+        const output = Array.isArray( payload.output ) ? payload.output : [];
+        const fscItems = searchCalls.map( fc => ( {
+            type: 'file_search_call',
+            id: fc.id,
+            status: fc.status,
+            queries: fc.queries,
+            ...( fc.results ? { results: fc.results } : {} ),
+        } ) );
+
+        return {
+            ...payload,
+            output: [ ...fscItems, ...output ],
         };
     }
 
@@ -2274,12 +2453,16 @@ export class OpenAIProxy {
         providerId: string,
         selectedModel: string,
         requestStartedAt: number,
+        fileSearchCalls?: FileSearchCallItem[],
     ): Promise<Response> {
         const endpoint = 'responses';
         const encoder = new TextEncoder();
         const upstreamReader = response.body!.getReader();
         const decoder = new TextDecoder();
         const responsesState = createResponsesStreamState( originalResponsesBody, requestStartedAt );
+        if ( fileSearchCalls && fileSearchCalls.length > 0 ) {
+            responsesState.fileSearchCalls = fileSearchCalls;
+        }
         let firstChunkLogged = false;
         let clientDisconnected = false;
         let sseBuffer = '';
