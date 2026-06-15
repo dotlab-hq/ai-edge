@@ -9,7 +9,10 @@
       "Bash(curl -s http://localhost:8888/health)",
       "Bash(netstat -ano)",
       "Bash(findstr :8888)",
-      "Bash(curl -s http://localhost:8888/anthropic/v1/messages --header 'x-api-key: test' --header 'anthropic-version: 2023-06-01' --header 'content-type: application/json' --data '{ *)"
+      "Bash(curl -s http://localhost:8888/anthropic/v1/messages --header 'x-api-key: test' --header 'anthropic-version: 2023-06-01' --header 'content-type: application/json' --data '{ *)",
+      "Bash(npx tsc *)",
+      "Bash(bunx tsc *)",
+      "Bash(npx bunx *)"
     ]
   }
 }

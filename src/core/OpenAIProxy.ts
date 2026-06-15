@@ -277,51 +277,75 @@ export class OpenAIProxy {
                     try {
                         const url = this.buildApiUrl( config, endpoint );
 
-                        // Build multipart form data for upstream
-                        const upstreamForm = new FormData();
-                        upstreamForm.append( 'model', selectedModel );
-                        upstreamForm.append( 'file', file );
-
-                        // Forward all optional fields
-                        const language = formData.get( 'language' );
-                        if ( language ) upstreamForm.append( 'language', language as string );
-                        const prompt = formData.get( 'prompt' );
-                        if ( prompt ) upstreamForm.append( 'prompt', prompt as string );
-                        const responseFormat = formData.get( 'response_format' );
-                        if ( responseFormat ) upstreamForm.append( 'response_format', responseFormat as string );
-                        const temperature = formData.get( 'temperature' );
-                        if ( temperature ) upstreamForm.append( 'temperature', temperature as string );
-                        const timestampGranularities = formData.getAll( 'timestamp_granularities[]' );
-                        for ( const tg of timestampGranularities ) {
-                            upstreamForm.append( 'timestamp_granularities[]', tg as string );
-                        }
-
                         // OpenAI v2025+ streaming STT fields
                         const streamField = formData.get( 'stream' );
                         const wantsStream = streamField === 'true' || streamField === '1';
+
+                        // Collect all fields to forward into a raw multipart body.
+                        // Hono-parsed File objects don't serialize correctly through undici FormData,
+                        // so we build multipart/form-data manually as a Buffer.
+                        const boundary = `----AIEDGE${ Math.random().toString( 36 ).slice( 2 ) }`;
+                        const parts: ( string | Buffer )[] = [];
+
+                        function appendText( name: string, value: string ) {
+                            parts.push(
+                                `--${ boundary }\r\n`,
+                                `Content-Disposition: form-data; name="${ name }"\r\n\r\n`,
+                                `${ value }\r\n`,
+                            );
+                        }
+
+                        appendText( 'model', selectedModel );
+
+                        // File part
+                        const fileBuffer = Buffer.from( await file.arrayBuffer() );
+                        const fileName = file.name || 'audio.wav';
+                        const fileType = file.type || 'audio/wav';
+                        parts.push(
+                            `--${ boundary }\r\n`,
+                            `Content-Disposition: form-data; name="file"; filename="${ fileName }"\r\n`,
+                            `Content-Type: ${ fileType }\r\n\r\n`,
+                            fileBuffer,
+                            `\r\n`,
+                        );
+
+                        // Forward all optional fields
+                        const textFields = [ 'language', 'prompt', 'response_format', 'temperature' ] as const;
+                        for ( const field of textFields ) {
+                            const val = formData.get( field );
+                            if ( val ) appendText( field, val as string );
+                        }
+
+                        const timestampGranularities = formData.getAll( 'timestamp_granularities[]' );
+                        for ( const tg of timestampGranularities ) {
+                            appendText( 'timestamp_granularities[]', tg as string );
+                        }
+
                         if ( wantsStream ) {
-                            upstreamForm.append( 'stream', 'true' );
+                            appendText( 'stream', 'true' );
                         }
 
                         const includeFields = formData.getAll( 'include[]' );
                         for ( const inc of includeFields ) {
-                            upstreamForm.append( 'include[]', inc as string );
+                            appendText( 'include[]', inc as string );
                         }
 
                         const chunkingStrategy = formData.get( 'chunking_strategy' );
                         if ( chunkingStrategy ) {
-                            upstreamForm.append( 'chunking_strategy', chunkingStrategy as string );
+                            appendText( 'chunking_strategy', chunkingStrategy as string );
                         }
 
-                        // Speaker diarization fields (OpenAI Realtime / Batch API)
                         const knownSpeakerNames = formData.getAll( 'known_speaker_names[]' );
                         for ( const name of knownSpeakerNames ) {
-                            upstreamForm.append( 'known_speaker_names[]', name as string );
+                            appendText( 'known_speaker_names[]', name as string );
                         }
                         const knownSpeakerReferences = formData.getAll( 'known_speaker_references[]' );
                         for ( const ref of knownSpeakerReferences ) {
-                            upstreamForm.append( 'known_speaker_references[]', ref as string );
+                            appendText( 'known_speaker_references[]', ref as string );
                         }
+
+                        parts.push( `--${ boundary }--\r\n` );
+                        const upstreamBody = Buffer.concat( parts.map( p => typeof p === 'string' ? Buffer.from( p ) : p ) );
 
                         console.info( `[${endpoint}] upstream_request provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds} stream=${wantsStream}` );
 
@@ -329,9 +353,10 @@ export class OpenAIProxy {
                             method: 'POST',
                             headers: {
                                 'Authorization': `Bearer ${config.apiKey}`,
+                                'Content-Type': `multipart/form-data; boundary=${ boundary }`,
                                 'User-Agent': 'ai-edge/1.0',
                             },
-                            body: upstreamForm,
+                            body: upstreamBody,
                         }, CONFIG.proxy, { skipTimeout: wantsStream } );
 
                         backendCooldownManager.markFromStatus( config.id, selectedModel, upstreamResponse.status );
