@@ -8,6 +8,7 @@ import { rateLimitManager } from "./src/core/RateLimitManager";
 import { getUnifiedModelCatalog, refreshUnifiedModelCatalog } from "./src/utils/modelCatalog";
 import { getUpstreamConnectionPoolStats, warmUpstreamConnection } from "./src/utils/proxyFetch";
 import { vectorStoreProxy } from "./src/core/VectorStoreProxy";
+import { realtimeProxy } from "./src/core/RealtimeProxy";
 
 const app = new Hono()
 
@@ -181,6 +182,7 @@ app.get( '/v1/models', async ( c ) => {
 } )
 
 app.route( '/', vectorStoreProxy.getApp() )
+app.route( '/', realtimeProxy.getApp() )
 app.route( '/', openAIProxy.getApp() )
 app.route( '/openai', openAIProxy.getApp() )
 app.route( '/anthropic', anthropicProxy.getApp() )

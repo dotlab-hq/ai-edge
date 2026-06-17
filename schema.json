@@ -327,6 +327,27 @@
       ],
       "additionalProperties": false
     },
+    "realtime": {
+      "description": "Realtime API proxy configuration — forwards /v1/realtime requests to the target endpoint",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the OpenAI Realtime API to proxy requests to (e.g. https://api.openai.com/v1)"
+        },
+        "apiKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "API key sent as Authorization header to the Realtime API"
+        }
+      },
+      "required": [
+        "url",
+        "apiKey"
+      ],
+      "additionalProperties": false
+    },
     "models": {
       "type": "object",
       "properties": {

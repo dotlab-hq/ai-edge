@@ -223,6 +223,11 @@ const VectorStoreSchema = z.object( {
   apiKey: z.string( { error: 'vectorStore.apiKey is required' } ).min( 1, 'vectorStore.apiKey cannot be empty' ).describe( 'API key sent as Authorization header to the vector store' ),
 } ).strict().optional().describe( 'Vector store proxy configuration — forwards /v1/vector_stores and /v1/files requests to the target. Check out https://github.com/dotlab-hq/vector-store! :)' )
 
+const RealtimeSchema = z.object( {
+  url: z.url( 'realtime.url must be a valid URL' ).describe( 'Base URL of the OpenAI Realtime API to proxy requests to (e.g. https://api.openai.com/v1)' ),
+  apiKey: z.string( { error: 'realtime.apiKey is required' } ).min( 1, 'realtime.apiKey cannot be empty' ).describe( 'API key sent as Authorization header to the Realtime API' ),
+} ).strict().optional().describe( 'Realtime API proxy configuration — forwards /v1/realtime requests to the target endpoint' )
+
 const ToolsSchema = z.object( {
   webSearch: WebSearchSchema.describe( 'Optional built-in web search providers used to satisfy OpenAI and Anthropic web search tool requests' ),
   code_interpreter: CodeInterpreterSchema.optional().describe( 'Alias for codeInterpreter (optional code interpreter provider)' ),
@@ -236,6 +241,7 @@ export const ConfigSchema = z.object( {
   rateLimit: RateLimitSchema.describe( 'Global rate limit applied to all models unless individualLimit is true' ),
   tools: ToolsSchema.describe( 'Optional built-in proxy tools such as web search' ),
   vectorStore: VectorStoreSchema,
+  realtime: RealtimeSchema,
   models: z.object( {
     openai: z.array( OpenAIModelSchema ).min( 1, 'At least one OpenAI config is required' ).optional().describe( 'OpenAI provider configurations. If omitted, no OpenAI models will be available' ),
     anthropic: z.array( AnthropicModelSchema ).min( 1, 'At least one Anthropic config is required' ).optional().describe( 'Anthropic provider configurations. If omitted, no Anthropic models will be available' ),
