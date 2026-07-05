@@ -44,6 +44,8 @@ export class AnthropicProxy {
     this.app.get( '/v1/models', ( c: Context ) => this.handleModels( c ) );
     this.app.post( '/v1/messages', ( c: Context ) => this.handleMessages( c ) );
     this.app.post( '/v1/messages/batches', ( c: Context ) => this.handleMessagesBatches( c ) );
+    // ponytail: alias without /v1 — chatbot SDK posts to /anthropic/messages directly
+    this.app.post( '/messages', ( c: Context ) => this.handleMessages( c ) );
   }
 
   private async handleModels( c: Context ) {

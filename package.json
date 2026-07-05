@@ -1,6 +1,6 @@
 {
   "name": "ai-edge",
-  "version": "1.0.53",
+  "version": "1.0.54",
   "description": "Local LLM routing server with OpenAI compatibility",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
   },
   "scripts": {
     "start": "node dist/server.js",
-    "dev": "bun run --hot src/dev.ts",
+    "dev": "AI_EDGE_DEBUG=1 bun run --hot src/dev.ts",
     "cli": "node dist/cli.js",
     "build": "bun build src/cli/index.ts --outfile dist/cli.js --target node && bun build src/dev.ts --outfile dist/server.js --target node",
     "link": "bun link",
