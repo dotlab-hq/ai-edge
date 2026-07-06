@@ -9,6 +9,9 @@ import { getUnifiedModelCatalog, refreshUnifiedModelCatalog } from "./src/utils/
 import { getUpstreamConnectionPoolStats, warmUpstreamConnection } from "./src/utils/proxyFetch";
 import { vectorStoreProxy } from "./src/core/VectorStoreProxy";
 import { realtimeProxy } from "./src/core/RealtimeProxy";
+import { skillsProxy } from "./src/core/SkillsProxy";
+import { openAISkillsProxy } from "./src/core/OpenAISkillsProxy";
+import { initSkillResolver } from "./src/core/SkillResolver";
 
 const app = new Hono()
 
@@ -118,6 +121,18 @@ warmConfiguredUpstreamConnections().catch( error => {
     console.warn( `[startup] upstream_connection_warmup_failed error=${error?.message || String( error )}` );
 } );
 
+// Initialize skills/file storage proxies (MongoDB + S3)
+if ( CONFIG.storage ) {
+    try {
+        skillsProxy.initialize( CONFIG.storage );
+        openAISkillsProxy.initialize( CONFIG.storage );
+        initSkillResolver( CONFIG.storage );
+        console.info( '[startup] skills_storage_initialized mongo_uri=' + CONFIG.storage.mongo_uri + ' s3_bucket=' + CONFIG.storage.s3.bucket );
+    } catch ( error: any ) {
+        console.warn( `[startup] skills_storage_init_failed error=${error?.message || String( error )}` );
+    }
+}
+
 app.get( '/', async ( c ) => {
     const data = await CACHE.getJson();
     try {
@@ -186,5 +201,11 @@ app.route( '/', realtimeProxy.getApp() )
 app.route( '/', openAIProxy.getApp() )
 app.route( '/openai', openAIProxy.getApp() )
 app.route( '/anthropic', anthropicProxy.getApp() )
+
+// Skills & Files — Anthropic-compatible routes at /anthropic (already mounted above via proxy)
+app.route( '/anthropic', skillsProxy.getApp() )
+// Skills & Files — OpenAI-compatible routes at /openai and root
+app.route( '/', openAISkillsProxy.getApp() )
+app.route( '/openai', openAISkillsProxy.getApp() )
 
 export default app

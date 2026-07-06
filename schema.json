@@ -83,6 +83,66 @@
       },
       "additionalProperties": false
     },
+    "storage": {
+      "description": "Storage backend for skills and files — requires MongoDB for metadata and S3-compatible object storage for content",
+      "type": "object",
+      "properties": {
+        "mongo_uri": {
+          "type": "string",
+          "minLength": 1,
+          "description": "MongoDB connection URI for skills, skill versions, and file metadata (e.g. mongodb://localhost:27017)"
+        },
+        "s3": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "minLength": 1,
+              "description": "S3-compatible endpoint URL (e.g. https://s3.amazonaws.com or http://minio:9000)"
+            },
+            "region": {
+              "default": "auto",
+              "description": "AWS region for S3 (default auto for S3-compatible services like MinIO)",
+              "type": "string"
+            },
+            "access_key": {
+              "type": "string",
+              "minLength": 1,
+              "description": "S3 access key ID"
+            },
+            "secret_key": {
+              "type": "string",
+              "minLength": 1,
+              "description": "S3 secret access key"
+            },
+            "bucket": {
+              "type": "string",
+              "minLength": 1,
+              "description": "S3 bucket name for skill and file storage"
+            },
+            "path_style": {
+              "default": false,
+              "description": "Use path-style S3 URLs (true for MinIO, false for AWS)",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "endpoint",
+            "region",
+            "access_key",
+            "secret_key",
+            "bucket",
+            "path_style"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "mongo_uri",
+        "s3"
+      ],
+      "additionalProperties": false
+    },
     "tools": {
       "description": "Optional built-in proxy tools such as web search",
       "type": "object",

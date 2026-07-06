@@ -228,6 +228,20 @@ const RealtimeSchema = z.object( {
   apiKey: z.string( { error: 'realtime.apiKey is required' } ).min( 1, 'realtime.apiKey cannot be empty' ).describe( 'API key sent as Authorization header to the Realtime API' ),
 } ).strict().optional().describe( 'Realtime API proxy configuration — forwards /v1/realtime requests to the target endpoint' )
 
+const StorageS3Schema = z.object( {
+  endpoint: z.string().min( 1 ).describe( 'S3-compatible endpoint URL (e.g. https://s3.amazonaws.com or http://minio:9000)' ),
+  region: z.string().default( 'auto' ).describe( 'AWS region for S3 (default auto for S3-compatible services like MinIO)' ),
+  access_key: z.string().min( 1 ).describe( 'S3 access key ID' ),
+  secret_key: z.string().min( 1 ).describe( 'S3 secret access key' ),
+  bucket: z.string().min( 1 ).describe( 'S3 bucket name for skill and file storage' ),
+  path_style: z.boolean().default( false ).describe( 'Use path-style S3 URLs (true for MinIO, false for AWS)' ),
+} )
+
+const StorageSchema = z.object( {
+  mongo_uri: z.string().min( 1 ).describe( 'MongoDB connection URI for skills, skill versions, and file metadata (e.g. mongodb://localhost:27017)' ),
+  s3: StorageS3Schema,
+} ).optional().describe( 'Storage backend for skills and files — requires MongoDB for metadata and S3-compatible object storage for content' )
+
 const ToolsSchema = z.object( {
   webSearch: WebSearchSchema.describe( 'Optional built-in web search providers used to satisfy OpenAI and Anthropic web search tool requests' ),
   code_interpreter: CodeInterpreterSchema.optional().describe( 'Alias for codeInterpreter (optional code interpreter provider)' ),
@@ -239,6 +253,7 @@ export const ConfigSchema = z.object( {
   '$schema': z.url( 'Not a valid $schema URL' ).describe( 'URL to the JSON Schema that this configuration adheres to' ),
   'state-adapter': StateAdapterSchema.describe( 'Storage backend for state management - redis, memory, or { redis_url: string }' ),
   rateLimit: RateLimitSchema.describe( 'Global rate limit applied to all models unless individualLimit is true' ),
+  storage: StorageSchema,
   tools: ToolsSchema.describe( 'Optional built-in proxy tools such as web search' ),
   vectorStore: VectorStoreSchema,
   realtime: RealtimeSchema,

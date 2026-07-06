@@ -23,6 +23,7 @@ import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
+import { resolveOpenAIBody, isSkillResolverReady } from './SkillResolver';
 import {
     convertResponsesRequestToChat,
     convertChatResponseToResponses,
@@ -864,6 +865,12 @@ export class OpenAIProxy {
 
     private async handleOpenAIRequest( c: Context, endpoint: string ) {
         const rawBody = await c.req.json().catch( () => ( {} ) );
+
+        // Resolve skill & file references before any processing
+        if ( isSkillResolverReady() ) {
+            await resolveOpenAIBody( rawBody );
+        }
+
         const normalizedBody = this.normalizeToolSearchForEndpoint( rawBody, endpoint );
 
         if ( this.shouldUseOpenAICodeInterpreter( normalizedBody ) ) {

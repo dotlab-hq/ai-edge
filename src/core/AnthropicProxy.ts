@@ -16,6 +16,7 @@ import { backendCooldownManager } from './BackendCooldownManager';
 import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
+import { resolveAnthropicBody, isSkillResolverReady } from './SkillResolver';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -71,6 +72,14 @@ export class AnthropicProxy {
     const requestStartedAt = Date.now();
     const rawBody = await c.req.json().catch( () => ( {} ) );
     const bodyParsedAt = Date.now();
+
+    // Resolve skill & file references before any processing
+    // Save container.id for multi-turn passthrough (upstream does not support containers)
+    const savedContainerId: string | undefined = rawBody?.container?.id;
+    if ( isSkillResolverReady() ) {
+        await resolveAnthropicBody( rawBody );
+    }
+
     const webSearchContext = await this.webSearchHandler.prepareAnthropicWebSearch( rawBody );
     const webSearchCompletedAt = Date.now();
     if ( webSearchContext.errorResponse ) {
@@ -308,13 +317,20 @@ export class AnthropicProxy {
           console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
           this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
           const finalPayload = this.attachUsageIfMissing( endpoint, body, responseWithWebSearch );
-          const sseOut: string[] = [];
-          sseOut.push( `event: message\ndata: ${JSON.stringify( finalPayload )}\n\n` );
-          sseOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
-          c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
-          c.header( 'Cache-Control', 'no-cache, no-transform' );
-          c.header( 'X-Accel-Buffering', 'no' );
-          return c.text( sseOut.join( '' ) );
+          // Multi-turn container passthrough: inject saved container.id so client can continue
+          if ( savedContainerId && finalPayload && typeof finalPayload === 'object' && !Array.isArray( finalPayload ) ) {
+            ( finalPayload as any ).container = { id: savedContainerId };
+          }
+          if ( body.stream === true ) {
+            const sseOut: string[] = [];
+            sseOut.push( `event: message\ndata: ${JSON.stringify( finalPayload )}\n\n` );
+            sseOut.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
+            c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+            c.header( 'Cache-Control', 'no-cache, no-transform' );
+            c.header( 'X-Accel-Buffering', 'no' );
+            return c.text( sseOut.join( '' ) );
+          }
+          return c.json( finalPayload );
         } catch ( error: any ) {
           this.providerStats.recordFailure( config.id, selectedModel );
           lastFailure = {
@@ -336,22 +352,30 @@ export class AnthropicProxy {
       const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
       console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}\nError: ${errorPayload}\n` );
       console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
+      const errPayload = { type: 'error', error: { type: 'api_error', message: typeof lastFailure.payload === 'object' && lastFailure.payload?.error?.message ? lastFailure.payload.error.message : 'Upstream request failed' } };
+      if ( body.stream === true ) {
+        const errSse: string[] = [];
+        errSse.push( `event: error\ndata: ${JSON.stringify( errPayload )}\n\n` );
+        errSse.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
+        c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
+        c.header( 'Cache-Control', 'no-cache, no-transform' );
+        return c.text( errSse.join( '' ) );
+      }
+      return c.json( errPayload, lastFailure.status as any );
+    }
+
+    console.error( `\n❌ [${endpoint}] ALL OPENAI PROVIDERS FAILED - No response from any backend\nModel: ${requestedModel}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
+    console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
+    const errPayload = { type: 'error', error: { type: 'internal_error', message: 'All providers failed' } };
+    if ( body.stream === true ) {
       const errSse: string[] = [];
-      errSse.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'api_error', message: typeof lastFailure.payload === 'object' && lastFailure.payload?.error?.message ? lastFailure.payload.error.message : 'Upstream request failed' } } )}\n\n` );
+      errSse.push( `event: error\ndata: ${JSON.stringify( errPayload )}\n\n` );
       errSse.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
       c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
       c.header( 'Cache-Control', 'no-cache, no-transform' );
       return c.text( errSse.join( '' ) );
     }
-
-    console.error( `\n❌ [${endpoint}] ALL OPENAI PROVIDERS FAILED - No response from any backend\nModel: ${requestedModel}\nAttempted: ${backends.map( b => b.id ).join( ', ' )}\n` );
-    console.info( `[messages] failed totalMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt}` );
-    const errSse: string[] = [];
-    errSse.push( `event: error\ndata: ${JSON.stringify( { type: 'error', error: { type: 'internal_error', message: 'All providers failed' } } )}\n\n` );
-    errSse.push( `event: message_stop\ndata: ${JSON.stringify( { type: 'message_stop' } )}\n\n` );
-    c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
-    c.header( 'Cache-Control', 'no-cache, no-transform' );
-    return c.text( errSse.join( '' ) );
+    return c.json( errPayload, 502 );
   }
 
   private async handleMessagesBatches( c: Context ) {
