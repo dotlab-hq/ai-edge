@@ -211,7 +211,6 @@ export class SkillStore {
         $set: {
           latest_version: version,
           description: record.description || undefined,
-          name: record.name || undefined,
         },
       }
     );
