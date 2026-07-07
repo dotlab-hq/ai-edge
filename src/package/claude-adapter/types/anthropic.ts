@@ -37,6 +37,7 @@ export type AnthropicContentBlock =
     | AnthropicImageBlock
     | AnthropicFileBlock
     | AnthropicAudioBlock
+    | AnthropicDocumentBlock
     | AnthropicToolUseBlock
     | AnthropicToolResultBlock;
 
@@ -69,6 +70,11 @@ export interface AnthropicFileBlock {
 
 export interface AnthropicAudioBlock {
     type: 'audio';
+    source?: AnthropicMediaSource;
+}
+
+export interface AnthropicDocumentBlock {
+    type: 'document';
     source?: AnthropicMediaSource;
 }
 

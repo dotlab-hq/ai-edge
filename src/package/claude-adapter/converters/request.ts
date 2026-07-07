@@ -1,4 +1,4 @@
-import type { AnthropicContentBlock, AnthropicMessage, AnthropicMessageRequest, AnthropicToolResultBlock } from '../types/anthropic';
+import type { AnthropicContentBlock, AnthropicDocumentBlock, AnthropicMessage, AnthropicMessageRequest, AnthropicToolResultBlock } from '../types/anthropic';
 import type {
     OpenAIChatRequest,
     OpenAIMessage,
@@ -274,8 +274,8 @@ function processUserContentBlocks(
 
         // Document blocks (resolved by SkillResolver to base64, or URL-based)
         if ( block.type === 'document' ) {
-            const docBlock = block as any;
-            const source = docBlock.source;
+            const docBlock = block as AnthropicDocumentBlock;
+            const source = docBlock.source as { type: string; media_type?: string; data?: string; url?: string } | undefined;
             if ( source?.type === 'base64' && source.data ) {
                 // Decode base64 — for text types inject as text, for binary types use image_url data URL
                 const mimeType = ( source.media_type || 'text/plain' ).toLowerCase();
