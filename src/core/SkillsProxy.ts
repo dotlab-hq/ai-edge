@@ -21,7 +21,25 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { getSkillStore, type SkillStore } from "./storage/SkillStore";
 import { getFileStore, type FileStore } from "./storage/FileStore";
-import type { StorageConfig } from "./storage/types";
+import type { StorageConfig, FileRecord } from "./storage/types";
+
+// ─── Anthropic format transformers ────────────────────
+
+/** Convert internal FileRecord → Anthropic Files API response format. */
+function toAnthropicFile(r: FileRecord) {
+  return {
+    id: r.id,
+    type: "file" as const,
+    created_at: new Date(r.created_at * 1000).toISOString(),
+    filename: r.filename,
+    mime_type: r.mime_type,
+    purpose: r.purpose,
+    size_bytes: r.size_bytes,
+    status: r.status,
+    scope_id: r.scope_id ?? null,
+    downloadable: r.downloadable ?? false,
+  };
+}
 
 export class SkillsProxy {
   private app: Hono;
@@ -489,7 +507,11 @@ export class SkillsProxy {
         before_id,
         scope_id,
       });
-      return c.json(result);
+      return c.json({
+        data: result.data.map(toAnthropicFile),
+        has_more: result.has_more,
+        next_page: result.next_page,
+      });
     } catch (error: any) {
       console.error(
         "[/v1/files] listFiles error:",
@@ -540,7 +562,7 @@ export class SkillsProxy {
           content,
           downloadable,
         });
-        return c.json(record, 201);
+        return c.json(toAnthropicFile(record), 201);
       } else {
         return c.json(
           {
@@ -585,7 +607,7 @@ export class SkillsProxy {
           404,
         );
       }
-      return c.json(record);
+      return c.json(toAnthropicFile(record));
     } catch (error: any) {
       console.error(
         "[/v1/files] getFile error:",
