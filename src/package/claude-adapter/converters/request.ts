@@ -272,6 +272,41 @@ function processUserContentBlocks(
             continue;
         }
 
+        // Document blocks (resolved by SkillResolver to base64, or URL-based)
+        if ( block.type === 'document' ) {
+            const docBlock = block as any;
+            const source = docBlock.source;
+            if ( source?.type === 'base64' && source.data ) {
+                // Decode base64 — for text types inject as text, for binary types use image_url data URL
+                const mimeType = ( source.media_type || 'text/plain' ).toLowerCase();
+                const isTextType = mimeType.startsWith( 'text/' ) ||
+                    mimeType === 'application/json' ||
+                    mimeType === 'application/xml' ||
+                    mimeType === 'application/javascript' ||
+                    mimeType === 'application/x-javascript' ||
+                    mimeType === 'application/typescript';
+                if ( isTextType ) {
+                    try {
+                        const decoded = Buffer.from( source.data, 'base64' ).toString( 'utf-8' );
+                        userContent.push( { type: 'text', text: decoded } );
+                    } catch {
+                        // If decode fails, skip
+                    }
+                } else {
+                    // Binary document (PDF, image, etc.) — use data URL in image_url block
+                    const dataUrl = `data:${mimeType};base64,${source.data}`;
+                    userContent.push( { type: 'image_url', image_url: { url: dataUrl } } );
+                }
+                continue;
+            }
+            if ( source?.type === 'url' && source.url ) {
+                userContent.push( { type: 'image_url', image_url: { url: source.url } } );
+                continue;
+            }
+            // Unresolved file reference — try as text fallback
+            continue;
+        }
+
         if ( block.type !== 'tool_result' ) {
             continue;
         }
