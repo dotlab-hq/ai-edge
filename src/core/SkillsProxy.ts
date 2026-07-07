@@ -173,6 +173,8 @@ export class SkillsProxy {
       const contentType = c.req.header( 'content-type' ) ?? '';
       let content: Buffer | undefined;
       let contentSize: number | undefined;
+      let name: string | undefined;
+      let description: string | undefined;
 
       if ( contentType.includes( 'multipart/form-data' ) ) {
         const formData = await c.req.formData();
@@ -182,8 +184,12 @@ export class SkillsProxy {
           content = Buffer.from( arrayBuffer );
           contentSize = content.length;
         }
+        name = formData.get( 'name' )?.toString();
+        description = formData.get( 'description' )?.toString();
       } else {
         const body = await c.req.json().catch( () => ( {} ) );
+        name = body.name;
+        description = body.description;
         if ( body.content ) {
           content = Buffer.from( typeof body.content === 'string' ? body.content : JSON.stringify( body.content ) );
           contentSize = content.length;
@@ -192,12 +198,8 @@ export class SkillsProxy {
 
       const version = await this.skillStore.createSkillVersion( {
         skill_id: skillId as string,
-        name: contentType.includes( 'multipart/form-data' )
-          ? ( await c.req.formData().catch( () => new FormData() ) ).get( 'name' )?.toString()
-          : undefined,
-        description: contentType.includes( 'multipart/form-data' )
-          ? ( await c.req.formData().catch( () => new FormData() ) ).get( 'description' )?.toString()
-          : undefined,
+        name,
+        description,
         content,
         contentSize,
       } );
