@@ -303,7 +303,13 @@ function processUserContentBlocks(
                 userContent.push( { type: 'image_url', image_url: { url: source.url } } );
                 continue;
             }
-            // Unresolved file reference — try as text fallback
+            // Unresolved file reference — emit text fallback so model sees something
+            const rawSource = ( docBlock.source as any ) ?? {};
+            if ( rawSource?.type === 'file' && rawSource.file_id ) {
+                userContent.push( { type: 'text', text: `[Attached file: ${rawSource.file_id}]` } );
+            } else {
+                userContent.push( { type: 'text', text: '[Unresolved document attachment]' } );
+            }
             continue;
         }
 

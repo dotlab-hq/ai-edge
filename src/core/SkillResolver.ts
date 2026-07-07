@@ -88,8 +88,13 @@ async function resolveSkillContent( skillId: string ): Promise<string | null> {
 async function resolveFileBinary( fileId: string ): Promise<{ body: Buffer; mimeType: string; filename: string } | null> {
   if ( !_fileStore ) return null;
   try {
+    console.log( `[SkillResolver] resolveFileBinary(${fileId}) calling _fileStore.getFileContent...` );
     const fileContent = await _fileStore.getFileContent( fileId );
-    if ( !fileContent ) return null;
+    if ( !fileContent ) {
+      console.error( `[SkillResolver] resolveFileBinary(${fileId}) → getFileContent returned null` );
+      return null;
+    }
+    console.log( `[SkillResolver] resolveFileBinary(${fileId}) → OK (${fileContent.contentType}, ${fileContent.sizeBytes} bytes)` );
     return {
       body: fileContent.body,
       mimeType: fileContent.contentType,
@@ -234,6 +239,7 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
 
   // ── 5. Resolve file references and replace blocks ──────
   if ( fileIds.size > 0 ) {
+    console.log( `[SkillResolver] resolving ${fileIds.size} file(s): ${Array.from( fileIds ).join( ', ' )}` );
     // Build a cache of resolved files (base64 + metadata)
     const fileCache = new Map<string, { data: string; media_type: string; filename: string }>();
     for ( const fileId of fileIds ) {
@@ -245,10 +251,32 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
           media_type: base64.media_type,
           filename: text?.filename ?? fileId,
         } );
+        console.log( `[SkillResolver] file ${fileId} resolved → ${base64.media_type} (${base64.data.length} chars base64)` );
+      } else {
+        console.error( `[SkillResolver] file ${fileId} FAILED to resolve` );
       }
     }
 
-    if ( fileCache.size === 0 ) return;
+    if ( fileCache.size === 0 ) {
+      console.error( `[SkillResolver] all file resolutions failed — injecting fallback text blocks` );
+      // Replace unresolved file references with text fallbacks so the model gets content
+      for ( const msg of body.messages ) {
+        if ( !Array.isArray( msg.content ) ) continue;
+        for ( let i = msg.content.length - 1; i >= 0; i-- ) {
+          const block = msg.content[i];
+          if ( block?.type === 'document' && block.source?.type === 'file' && block.source?.file_id ) {
+            msg.content[i] = { type: 'text', text: `[File ${block.source.file_id} could not be resolved]` };
+          }
+          if ( block?.type === 'image' && block.source?.type === 'file' && block.source?.file_id ) {
+            msg.content[i] = { type: 'text', text: `[Image ${block.source.file_id} could not be resolved]` };
+          }
+          if ( block?.type === 'container_upload' && block.file_id ) {
+            msg.content[i] = { type: 'text', text: `[File ${block.file_id} could not be resolved]` };
+          }
+        }
+      }
+      return;
+    }
 
     // Replace file reference blocks in messages
     for ( const msg of body.messages ) {
@@ -256,7 +284,7 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
       for ( let i = msg.content.length - 1; i >= 0; i-- ) {
         const block = msg.content[i];
 
-        // Document block with file source → replace source with base64
+        // Document block with file source → replace source with base64 or fallback
         if ( block?.type === 'document' && block.source?.type === 'file' && block.source?.file_id ) {
           const cached = fileCache.get( block.source.file_id );
           if ( cached ) {
@@ -268,10 +296,12 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
                 data: cached.data,
               },
             };
+          } else {
+            msg.content[i] = { type: 'text', text: `[File ${block.source.file_id} could not be resolved]` };
           }
         }
 
-        // Image block with file source → replace source with base64
+        // Image block with file source → replace source with base64 or fallback
         if ( block?.type === 'image' && block.source?.type === 'file' && block.source?.file_id ) {
           const cached = fileCache.get( block.source.file_id );
           if ( cached ) {
@@ -283,10 +313,12 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
                 data: cached.data,
               },
             };
+          } else {
+            msg.content[i] = { type: 'text', text: `[Image ${block.source.file_id} could not be resolved]` };
           }
         }
 
-        // Container upload block → replace with document or image
+        // Container upload block → replace with document, image, or fallback
         if ( block?.type === 'container_upload' && block.file_id ) {
           const cached = fileCache.get( block.file_id );
           if ( cached ) {
@@ -309,6 +341,8 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
                 },
               };
             }
+          } else {
+            msg.content[i] = { type: 'text', text: `[File ${block.file_id} could not be resolved]` };
           }
         }
 
@@ -323,6 +357,8 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
                   type: 'document',
                   source: { type: 'base64', media_type: cached.media_type, data: cached.data },
                 };
+              } else {
+                block.content[j] = { type: 'text', text: `[File ${subBlock.source.file_id} could not be resolved]` };
               }
             }
             if ( subBlock?.type === 'image' && subBlock.source?.type === 'file' && subBlock.source?.file_id ) {
@@ -332,6 +368,8 @@ export async function resolveAnthropicBody( body: any ): Promise<void> {
                   type: 'image',
                   source: { type: 'base64', media_type: cached.media_type, data: cached.data },
                 };
+              } else {
+                block.content[j] = { type: 'text', text: `[Image ${subBlock.source.file_id} could not be resolved]` };
               }
             }
           }

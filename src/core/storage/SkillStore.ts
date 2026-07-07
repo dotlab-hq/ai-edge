@@ -33,17 +33,24 @@ const SKILL_VERSIONS_COLLECTION = 'skill_versions';
 let _skillStore: SkillStore | null = null;
 
 export class SkillStore {
-  private dbPromise: Promise<Db>;
+  private dbPromise: Promise<Db> | null = null;
   private mongoUri?: string;
   private s3Inited = false;
 
   constructor( mongoUri?: string ) {
     this.mongoUri = mongoUri;
-    this.dbPromise = getMongoDb( mongoUri );
+  }
+
+  /** Lazily connect to MongoDB on first use. */
+  private async getDb(): Promise<Db> {
+    if ( !this.dbPromise ) {
+      this.dbPromise = getMongoDb( this.mongoUri );
+    }
+    return this.dbPromise;
   }
 
   private async skills(): Promise<Collection<SkillRecord>> {
-    const db = await this.dbPromise;
+    const db = await this.getDb();
     const col = db.collection<SkillRecord>( SKILLS_COLLECTION );
     await col.createIndex( { id: 1 }, { unique: true } );
     await col.createIndex( { display_title: 1 } );
@@ -52,7 +59,7 @@ export class SkillStore {
   }
 
   private async versions(): Promise<Collection<SkillVersionRecord>> {
-    const db = await this.dbPromise;
+    const db = await this.getDb();
     const col = db.collection<SkillVersionRecord>( SKILL_VERSIONS_COLLECTION );
     await col.createIndex( { id: 1 }, { unique: true } );
     await col.createIndex( { skill_id: 1 } );

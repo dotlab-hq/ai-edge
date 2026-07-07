@@ -28,17 +28,24 @@ const FILES_COLLECTION = 'files';
 let _fileStore: FileStore | null = null;
 
 export class FileStore {
-  private dbPromise: Promise<Db>;
+  private dbPromise: Promise<Db> | null = null;
   private mongoUri?: string;
   private s3Inited = false;
 
   constructor( mongoUri?: string ) {
     this.mongoUri = mongoUri;
-    this.dbPromise = getMongoDb( mongoUri );
+  }
+
+  /** Lazily connect to MongoDB on first use. */
+  private async getDb(): Promise<Db> {
+    if ( !this.dbPromise ) {
+      this.dbPromise = getMongoDb( this.mongoUri );
+    }
+    return this.dbPromise;
   }
 
   private async files(): Promise<Collection<FileRecord>> {
-    const db = await this.dbPromise;
+    const db = await this.getDb();
     const col = db.collection<FileRecord>( FILES_COLLECTION );
     await col.createIndex( { id: 1 }, { unique: true } );
     await col.createIndex( { purpose: 1 } );
@@ -92,7 +99,10 @@ export class FileStore {
    */
   async getFile( fileId: string ): Promise<FileRecord | null> {
     const col = await this.files();
-    return col.findOne( { id: fileId } );
+    console.log( `[FileStore] getFile(${fileId}) querying collection...` );
+    const doc = await col.findOne( { id: fileId } );
+    console.log( `[FileStore] getFile(${fileId}) result: ${doc ? `found (mime=${doc.mime_type}, _s3Key=${doc._s3Key}, downloadable=${doc.downloadable})` : 'NOT FOUND'}` );
+    return doc;
   }
 
   /**
@@ -163,17 +173,27 @@ export class FileStore {
    */
   async getFileContent( fileId: string ): Promise<{ body: Buffer; filename: string; contentType: string; sizeBytes: number } | null> {
     const record = await this.getFile( fileId );
-    if ( !record || !record._s3Key ) return null;
+    if ( !record ) {
+      console.error( `[FileStore] getFileContent(${fileId}): no record found` );
+      return null;
+    }
+    if ( !record._s3Key ) {
+      console.error( `[FileStore] getFileContent(${fileId}): record found but _s3Key is missing` );
+      return null;
+    }
+    console.log( `[FileStore] getFileContent(${fileId}): fetching S3 object key=${record._s3Key}` );
 
     try {
       const { body, contentType, contentLength } = await s3GetObject( record._s3Key );
+      console.log( `[FileStore] getFileContent(${fileId}): S3 fetch OK (${contentType}, ${contentLength} bytes)` );
       return {
         body,
         filename: record.filename,
         contentType,
         sizeBytes: contentLength,
       };
-    } catch {
+    } catch ( err: any ) {
+      console.error( `[FileStore] getFileContent(${fileId}): S3 fetch FAILED:`, err?.message || String( err ) );
       return null;
     }
   }

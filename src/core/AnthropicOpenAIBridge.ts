@@ -885,7 +885,7 @@ function normalizeAnthropicMessage( message: AnthropicMessageRequest['messages']
             continue;
         }
 
-        if ( block.type === 'image' || block.type === 'audio' || block.type === 'file' ) {
+        if ( block.type === 'image' || block.type === 'audio' || block.type === 'file' || block.type === 'document' || block.type === 'container_upload' ) {
             normalizedContent.push( block );
             continue;
         }

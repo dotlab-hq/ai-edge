@@ -7,6 +7,7 @@ import type { StorageConfig } from './types';
 
 let client: MongoClient | null = null;
 let db: Db | null = null;
+let connectionFailed = false;
 
 const DEFAULT_DB_NAME = 'ai_edge_skills';
 const CONNECT_OPTIONS: MongoClientOptions = {
@@ -34,8 +35,14 @@ export async function getMongoDb( mongoUri?: string ): Promise<Db> {
   const dbName = url.pathname.replace( /^\//, '' ) || DEFAULT_DB_NAME;
   db = client.db( dbName );
 
+  connectionFailed = false;
   console.info( `[mongo] connected uri=${uri.replace( /\/\/[^:]+:[^@]+@/, '//***:***@' )} db=${dbName}` );
   return db;
+}
+
+/** Returns true if the last connection attempt succeeded. */
+export function isMongoConnected(): boolean {
+  return db !== null && !connectionFailed;
 }
 
 export async function closeMongo(): Promise<void> {
