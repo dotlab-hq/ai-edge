@@ -10,8 +10,6 @@ export class VectorStoreProxy {
         this.app = new Hono();
         this.app.all( '/v1/vector_stores/*', ( c ) => this.proxy( c ) );
         this.app.all( '/v1/vector_stores', ( c ) => this.proxy( c ) );
-        this.app.all( '/v1/files/*', ( c ) => this.proxy( c ) );
-        this.app.all( '/v1/files', ( c ) => this.proxy( c ) );
     }
 
     getApp(): Hono {

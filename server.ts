@@ -202,10 +202,11 @@ app.route( '/', openAIProxy.getApp() )
 app.route( '/openai', openAIProxy.getApp() )
 app.route( '/anthropic', anthropicProxy.getApp() )
 
-// Skills & Files — Anthropic-compatible routes at /anthropic (already mounted above via proxy)
+// Skills & Files — Anthropic-compatible routes (/skills, /files) at /anthropic
 app.route( '/anthropic', skillsProxy.getApp() )
-// Skills & Files — OpenAI-compatible routes at /openai and root
+// Skills & Files — OpenAI-compatible routes at root, /v1, and /openai
 app.route( '/', openAISkillsProxy.getApp() )
+app.route( '/v1', openAISkillsProxy.getApp() )
 app.route( '/openai', openAISkillsProxy.getApp() )
 
 export default app
