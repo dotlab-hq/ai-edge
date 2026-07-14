@@ -1,0 +1,186 @@
+import type { ResponsesRequest, ChatCompletionRequest, ChatMessage, ChatTool } from './types';
+import {
+    generateId,
+    normaliseInputItems,
+    extractToolCallsFromAssistantItem,
+    convertToolsToChat,
+    convertToolChoiceToChat,
+    resolveReasoningEffort,
+} from './helpers';
+
+export function convertResponsesRequestToChat( request: ResponsesRequest ): ChatCompletionRequest {
+    const messages = buildMessagesFromResponsesInput( request );
+    const chatRequest: ChatCompletionRequest = {
+        model: request.model,
+        messages,
+    };
+
+    if ( request.max_output_tokens != null ) {
+        chatRequest.max_tokens = request.max_output_tokens;
+    }
+    if ( request.temperature != null ) chatRequest.temperature = request.temperature;
+    if ( request.top_p != null ) chatRequest.top_p = request.top_p;
+    if ( request.stream != null ) chatRequest.stream = request.stream;
+    if ( request.stop ) chatRequest.stop = request.stop;
+    if ( request.presence_penalty != null ) chatRequest.presence_penalty = request.presence_penalty;
+    if ( request.frequency_penalty != null ) chatRequest.frequency_penalty = request.frequency_penalty;
+    if ( request.seed != null ) chatRequest.seed = request.seed;
+
+    if ( request.stream ) {
+        chatRequest.stream_options = { include_usage: true };
+    }
+
+    const tools = convertToolsToChat( request.tools );
+    if ( tools.length > 0 ) chatRequest.tools = tools;
+
+    const toolChoice = convertToolChoiceToChat( request.tool_choice );
+    if ( toolChoice ) chatRequest.tool_choice = toolChoice;
+
+    const reasoningEffort = resolveReasoningEffort( request );
+    if ( reasoningEffort ) chatRequest.reasoning_effort = reasoningEffort;
+
+    // ── Responses-only fields that must NOT leak into chat/completions ──
+    const RESPONSES_ONLY_FIELDS = new Set<string>( [
+        'input',
+        'instructions',
+        'reasoning',
+        'max_output_tokens',
+    ] );
+
+    // Carry through any extra fields not explicitly mapped (skip Responses-only fields)
+    for ( const [key, value] of Object.entries( request ) ) {
+        if ( !( key in chatRequest ) && value !== undefined && !RESPONSES_ONLY_FIELDS.has( key ) ) {
+            ( chatRequest as Record<string, unknown> )[key] = value;
+        }
+    }
+
+    return chatRequest;
+}
+
+function buildMessagesFromResponsesInput( request: ResponsesRequest ): ChatMessage[] {
+    const messages: ChatMessage[] = [];
+
+    // `instructions` → system message
+    if ( typeof request.instructions === 'string' && request.instructions.trim() ) {
+        messages.push( { role: 'system', content: request.instructions } );
+    }
+
+    const inputItems = normaliseInputItems( request.input );
+
+    for ( const item of inputItems ) {
+        const mapped = mapInputItemToMessage( item );
+        if ( mapped ) {
+            if ( Array.isArray( mapped ) ) {
+                messages.push( ...mapped );
+            } else {
+                messages.push( mapped );
+            }
+        }
+    }
+
+    return messages;
+}
+
+function mapInputItemToMessage( item: Record<string, unknown> ): ChatMessage | ChatMessage[] | null {
+    const type = item.type as string | undefined;
+
+    // ── function_call (model requesting to call a tool) ──
+    if ( type === 'function_call' ) {
+        return {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+                id: ( item.call_id as string ) || ( item.id as string ) || generateId( 'call' ),
+                type: 'function',
+                function: {
+                    name: ( item.name as string ) || '',
+                    arguments: ( item.arguments as string ) || '{}',
+                },
+            }],
+        };
+    }
+
+    // ── function_call_output (tool result from caller) ──
+    if ( type === 'function_call_output' ) {
+        return {
+            role: 'tool',
+            tool_call_id: ( item.call_id as string ) || '',
+            content: typeof item.output === 'string' ? item.output : JSON.stringify( item.output ?? '' ),
+        };
+    }
+
+    // ── message items (role-based) ──
+    const role = ( item.role as string ) || 'user';
+
+    if ( role === 'system' || role === 'developer' ) {
+        return { role: 'system', content: flattenContent( item.content ) };
+    }
+
+    if ( role === 'assistant' ) {
+        // Assistant with tool_calls embedded in the output array
+        if ( type === 'function_call' ) {
+            // Already handled above, but guard
+            return null;
+        }
+        const toolCalls = extractToolCallsFromAssistantItem( item );
+        return {
+            role: 'assistant',
+            content: flattenContent( item.content ),
+            ...( toolCalls.length > 0 ? { tool_calls: toolCalls } : {} ),
+        };
+    }
+
+    // user or default
+    return { role: 'user', content: flattenContent( item.content ) };
+}
+
+function flattenContent( content: unknown ): string | Array<Record<string, unknown>> | null {
+    if ( content == null ) return null;
+    if ( typeof content === 'string' ) return content;
+    if ( Array.isArray( content ) ) {
+        const hasImages = content.some( ( block ) => {
+            if ( !block || typeof block !== 'object' ) return false;
+            const t = block.type as string;
+            return ( t === 'input_image' && typeof block.image_url === 'string' )
+                || ( t === 'image_url' && typeof ( block.image_url ?? block.url ) === 'string' );
+        } );
+
+        // Use multimodal content array format when images are present
+        if ( hasImages ) {
+            const parts: Array<Record<string, unknown>> = [];
+            for ( const block of content ) {
+                if ( !block || typeof block !== 'object' ) continue;
+                const t = block.type as string;
+                if ( t === 'input_text' && typeof block.text === 'string' ) {
+                    parts.push( { type: 'text', text: block.text } );
+                } else if ( t === 'input_image' && typeof block.image_url === 'string' ) {
+                    parts.push( { type: 'image_url', image_url: { url: block.image_url } } );
+                } else if ( t === 'image_url' && typeof ( block.image_url ?? block.url ) === 'string' ) {
+                    parts.push( { type: 'image_url', image_url: { url: block.image_url ?? block.url } } );
+                } else if ( typeof block.text === 'string' ) {
+                    parts.push( { type: 'text', text: block.text } );
+                }
+            }
+            return parts.length > 0 ? parts : null;
+        }
+
+        // Text-only: join into a flat string
+        const texts: string[] = [];
+        for ( const block of content ) {
+            if ( !block || typeof block !== 'object' ) continue;
+            const t = block.type as string;
+            if ( t === 'input_text' && typeof block.text === 'string' ) {
+                texts.push( block.text );
+            } else if ( typeof block.text === 'string' ) {
+                texts.push( block.text );
+            }
+        }
+        return texts.join( '\n' ) || null;
+    }
+    if ( typeof content === 'object' && typeof ( content as any ).text === 'string' ) {
+        return ( content as any ).text;
+    }
+    return null;
+}
+
+
