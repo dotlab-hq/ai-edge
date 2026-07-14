@@ -1,70 +1,28 @@
-import type { Config } from '@/schema';
 import { stripFreeModifier } from '@/utils/modelIds';
-import { CONFIG } from '@/utils/schema.lookup';
 
-type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
-type OpenAIModelEntry = OpenAIModelConfig['models'][number];
+import {
+    AUTO_MODEL_ID,
+    SUPPORTED_ENDPOINTS,
+    type CompiledRoutingProvider,
+    type OpenAIModelConfig,
+    type RoutingCandidateModelOptions,
+    type RoutingEndpoint,
+    type RoutingEndpointCapabilities,
+    type RoutingPoolOptions,
+    type RoutingProviderPool,
+    type RoutingProviderSnapshot,
+    type RoutingSnapshotConfigResolver,
+} from './routing/snapshotTypes';
+import {
+    cloneOpenAIModelConfig,
+    computeEndpointCapabilities,
+    normalizeStartIndex,
+    rotateList,
+    uniqueModelNames,
+    uniqueNormalizedIds,
+} from './routing/snapshotBuild';
 
-const AUTO_MODEL_ID = 'auto';
-
-export type RoutingEndpoint =
-    | 'chat/completions'
-    | 'completions'
-    | 'responses'
-    | 'messages'
-    | 'embeddings'
-    | 'images/generations'
-    | 'images/edits';
-
-const SUPPORTED_ENDPOINTS: readonly RoutingEndpoint[] = [
-    'chat/completions',
-    'completions',
-    'responses',
-    'messages',
-    'embeddings',
-    'images/generations',
-    'images/edits',
-];
-
-export type RoutingEndpointCapabilities = Readonly<Record<RoutingEndpoint, boolean>>;
-
-export type RoutingProviderSnapshot = Readonly<{
-    id: string;
-    index: number;
-    randomRouting: boolean;
-    modelNames: readonly string[];
-    normalizedModelIds: readonly string[];
-    capabilities: RoutingEndpointCapabilities;
-    config: OpenAIModelConfig;
-}>;
-
-type CompiledRoutingProvider = RoutingProviderSnapshot & {
-    readonly normalizedModelSet: ReadonlySet<string>;
-};
-
-export type RoutingPoolOptions = Readonly<{
-    includeFallback?: boolean;
-    honorRandomRouting?: boolean;
-}>;
-
-export type RoutingCandidateModelOptions = Readonly<{
-    honorRandomRouting?: boolean;
-    randomize?: boolean;
-    startIndex?: number;
-    random?: () => number;
-}>;
-
-export type RoutingProviderPool = Readonly<{
-    endpoint: RoutingEndpoint;
-    requestedModel: string;
-    normalizedRequestedModel: string;
-    isAutoModel: boolean;
-    includeFallback: boolean;
-    honorRandomRouting: boolean;
-    exactProviders: readonly RoutingProviderSnapshot[];
-    fallbackProviders: readonly RoutingProviderSnapshot[];
-    providers: readonly RoutingProviderSnapshot[];
-}>;
+export type { RoutingEndpoint, RoutingEndpointCapabilities, RoutingProviderSnapshot, RoutingPoolOptions, RoutingCandidateModelOptions, RoutingProviderPool } from './routing/snapshotTypes';
 
 export class RoutingSnapshot {
     readonly compiledAt: number;
@@ -191,7 +149,6 @@ export class RoutingSnapshot {
         const exactProviders = modelLookup?.get( normalizedRequestedModel ) ?? [];
         const exactIds = new Set( exactProviders.map( provider => provider.id ) );
 
-        // Unlisted models are treated as auto-edge.
         const modelIsListed = exactProviders.length > 0;
         const isAutoModel = explicitlyAuto || !modelIsListed;
 
@@ -240,7 +197,6 @@ export class RoutingSnapshot {
         const honorRandomRouting = options.honorRandomRouting !== false;
         const randomize = options.randomize !== false;
 
-        // Unlisted models are treated as auto-edge.
         const modelInThisProvider = provider.normalizedModelSet.has( requestedNormalized );
         const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
@@ -278,128 +234,9 @@ export class RoutingSnapshot {
     }
 }
 
-export type RoutingSnapshotConfigResolver = () => ReadonlyArray<OpenAIModelConfig> | undefined;
+export type { RoutingSnapshotConfigResolver } from './routing/snapshotTypes';
 
-export class RoutingSnapshotStore {
-    private snapshot: RoutingSnapshot;
-
-    constructor(
-        private readonly configResolver: RoutingSnapshotConfigResolver,
-        initialSnapshot?: RoutingSnapshot
-    ) {
-        this.snapshot = initialSnapshot ?? RoutingSnapshot.compile( configResolver() ?? [] );
-    }
-
-    getSnapshot(): RoutingSnapshot {
-        return this.snapshot;
-    }
-
-    rebuild(): RoutingSnapshot {
-        const nextSnapshot = RoutingSnapshot.compile( this.configResolver() ?? [] );
-        this.snapshot = nextSnapshot;
-        return nextSnapshot;
-    }
-
-    replace( snapshot: RoutingSnapshot ): RoutingSnapshot {
-        this.snapshot = snapshot;
-        return snapshot;
-    }
-}
-
-export function buildRoutingSnapshotFromConfig(
-    configs: ReadonlyArray<OpenAIModelConfig> | undefined = CONFIG.models.openai ?? []
-): RoutingSnapshot {
-    return RoutingSnapshot.compile( configs ?? [] );
-}
-
-function uniqueModelNames( models: OpenAIModelConfig['models'] ): string[] {
-    const names: string[] = [];
-    const seen = new Set<string>();
-    for ( const model of models ) {
-        const name = typeof model === 'string' ? model : model.model;
-        if ( !name || seen.has( name ) ) {
-            continue;
-        }
-        seen.add( name );
-        names.push( name );
-    }
-    return names;
-}
-
-function uniqueNormalizedIds( modelNames: readonly string[] ): string[] {
-    const normalized: string[] = [];
-    const seen = new Set<string>();
-    for ( const modelName of modelNames ) {
-        const normalizedId = stripFreeModifier( modelName ).normalizedId;
-        if ( !normalizedId || seen.has( normalizedId ) ) {
-            continue;
-        }
-        seen.add( normalizedId );
-        normalized.push( normalizedId );
-    }
-    return normalized;
-}
-
-function computeEndpointCapabilities( config: OpenAIModelConfig ): RoutingEndpointCapabilities {
-    const embeddingsEnabled = config.embeddings === true;
-    const imageModels = config.imageModels;
-    const imageGenerationEnabled = typeof imageModels === 'object' && imageModels?.image_generation === true;
-    const imageEditingEnabled = typeof imageModels === 'object' && imageModels?.image_editing === true;
-    const imageOnly = typeof imageModels === 'boolean'
-        ? imageModels
-        : imageGenerationEnabled || imageEditingEnabled;
-    const textEndpointsEnabled = !embeddingsEnabled && !imageOnly;
-
-    return Object.freeze( {
-        'chat/completions': textEndpointsEnabled,
-        completions: textEndpointsEnabled,
-        responses: textEndpointsEnabled,
-        messages: textEndpointsEnabled,
-        embeddings: embeddingsEnabled,
-        'images/generations': imageGenerationEnabled,
-        'images/edits': imageEditingEnabled,
-    } );
-}
-
-function cloneOpenAIModelConfig( config: OpenAIModelConfig ): OpenAIModelConfig {
-    const models = config.models.map( ( model ): OpenAIModelEntry => {
-        if ( typeof model === 'string' ) {
-            return model;
-        }
-        return {
-            ...model,
-            rateLimit: { ...model.rateLimit },
-            reasoning_efforts: Array.isArray( model.reasoning_efforts ) ? [...model.reasoning_efforts] : undefined,
-        };
-    } ) as OpenAIModelConfig['models'];
-
-    const imageModels = typeof config.imageModels === 'object' && config.imageModels
-        ? { ...config.imageModels }
-        : config.imageModels;
-
-    return {
-        ...config,
-        models,
-        imageModels,
-        rateLimit: config.rateLimit ? { ...config.rateLimit } : undefined,
-        reasoning_efforts: Array.isArray( config.reasoning_efforts ) ? [...config.reasoning_efforts] : undefined,
-    };
-}
-
-function normalizeStartIndex( startIndex: number | undefined, total: number, fallback: () => number ): number {
-    if ( total <= 0 ) {
-        return 0;
-    }
-    if ( typeof startIndex === 'number' && Number.isFinite( startIndex ) ) {
-        const normalized = Math.floor( startIndex ) % total;
-        return normalized >= 0 ? normalized : normalized + total;
-    }
-    return fallback();
-}
-
-function rotateList<T>( items: readonly T[], startIndex: number ): T[] {
-    if ( !items.length || startIndex <= 0 ) {
-        return items.slice();
-    }
-    return [...items.slice( startIndex ), ...items.slice( 0, startIndex )];
-}
+export {
+    RoutingSnapshotStore,
+    buildRoutingSnapshotFromConfig,
+} from './routing/snapshotStore';
