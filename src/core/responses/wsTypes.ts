@@ -15,7 +15,7 @@ export interface CachedResponse {
 export interface WSConnection {
     ws: WebSocket;
     alive: boolean;
-    timer: NodeJS.Timeout;
+    missedPongs: number;
     queuedMessages: any[];
     inFlight: boolean;
     responseCache: Map<string, CachedResponse>;

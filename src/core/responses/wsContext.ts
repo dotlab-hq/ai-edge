@@ -24,13 +24,9 @@ export function safeSend(
     options: { critical?: boolean } = {},
 ): boolean {
     if ( ws.readyState !== WebSocket.OPEN ) return false;
-    if ( ws.bufferedAmount > 4_194_304 ) {
-        console.warn( `[ws:responses] Client buffer overflow (${ws.bufferedAmount} bytes), closing` );
-        ws.close( 1009, 'Client too slow (buffer overflow)' );
-        return false;
-    }
-    if ( !options.critical && ws.bufferedAmount > 1_048_576 ) {
-        console.warn( `[ws:responses] Client buffer high (${ws.bufferedAmount} bytes), skipping chunk` );
+    // Don't close on overflow — let the server heartbeat handle dead clients.
+    // Just drop non-critical frames if the buffer is large.
+    if ( !options.critical && ws.bufferedAmount > 4_194_304 ) {
         return false;
     }
     try {

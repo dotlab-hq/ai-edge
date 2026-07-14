@@ -6,6 +6,9 @@ import { validateUpgradeAuth } from './responses/wsAuth';
 import { emitJson } from './responses/wsContext';
 import type { WSConnection } from './responses/wsTypes';
 
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const MISSED_PONG_LIMIT = 3;
+
 export function setupResponsesWebSocket( server: Server ): void {
     const wss = new WebSocketServer( { noServer: true } );
 
@@ -37,19 +40,7 @@ export function setupResponsesWebSocket( server: Server ): void {
         const conn: WSConnection = {
             ws,
             alive: true,
-            timer: setTimeout( () => {
-                console.info( '[ws:responses] Connection timeout (60min)' );
-                emitJson( conn, {
-                    type: 'error',
-                    status: 400,
-                    error: {
-                        type: 'invalid_request_error',
-                        code: 'websocket_connection_limit_reached',
-                        message: 'Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.',
-                    },
-                } );
-                ws.close( 1000, 'Connection limit reached (60 minutes)' );
-            }, 60 * 60 * 1000 ),
+            missedPongs: 0,
             queuedMessages: [],
             inFlight: false,
             responseCache: new Map(),
@@ -84,22 +75,37 @@ export function setupResponsesWebSocket( server: Server ): void {
 
         ws.on( 'close', () => cleanupConnection( conn ) );
         ws.on( 'error', ( err ) => {
+            // Log WS errors but don't close — the close event handles cleanup.
+            // Most WS errors are transient (ECONNRESET, EPIPE) and the socket
+            // is already in a terminal state by the time this fires.
             console.error( `[ws:responses] Error: ${err.message}` );
-            cleanupConnection( conn );
         } );
-        ws.on( 'pong', () => { conn.alive = true; } );
+        ws.on( 'pong', () => { conn.alive = true; conn.missedPongs = 0; } );
+        // Respond to client pings so load balancers / proxies don't kill the connection
+        ws.on( 'ping', () => { try { ws.pong(); } catch { /* ignore */ } } );
     } );
 
+    // Server-side heartbeat: if a client misses MISSED_PONG_LIMIT consecutive
+    // pings it is assumed dead and terminated.
     const heartbeat = setInterval( () => {
         wss.clients.forEach( ( ws ) => {
             if ( ws.readyState !== WebSocket.OPEN ) return;
-            ( ws as any ).alive === false ? ws.terminate() : ( ( ws as any ).alive = false, ws.ping() );
+            const conn = ( ws as any ) as WSConnection;
+            if ( conn.alive === false ) {
+                conn.missedPongs = ( conn.missedPongs ?? 0 ) + 1;
+                if ( conn.missedPongs >= MISSED_PONG_LIMIT ) {
+                    ws.terminate();
+                }
+            } else {
+                conn.alive = false;
+                ws.ping();
+            }
         } );
-    }, 30_000 );
+    }, HEARTBEAT_INTERVAL_MS );
 
     wss.on( 'close', () => clearInterval( heartbeat ) );
 
-    console.info( '[ws:responses] WebSocket handler attached' );
+    console.info( `[ws:responses] WebSocket handler attached (heartbeat=${HEARTBEAT_INTERVAL_MS}ms maxMissed=${MISSED_PONG_LIMIT})` );
 }
 
 function processQueue( conn: WSConnection ): void {
@@ -113,7 +119,6 @@ function processQueue( conn: WSConnection ): void {
 }
 
 function cleanupConnection( conn: WSConnection ): void {
-    clearTimeout( conn.timer );
     conn.alive = false;
     if ( conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING ) {
         try { conn.ws.close(); } catch { /* ignore */ }
