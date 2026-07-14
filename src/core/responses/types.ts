@@ -115,6 +115,7 @@ export interface ResponsesStreamState {
     toolCalls: Array<{ id: string; name: string; arguments: string }>;
     reasoningItems: Array<{ itemId: string; text: string }>;
     currentReasoningBlockOpen: boolean;
+    reasoningBuffer: string;
     fileSearchCalls: FileSearchCallItem[];
 }
 

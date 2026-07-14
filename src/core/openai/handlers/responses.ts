@@ -1,4 +1,5 @@
 import type { Context } from 'hono';
+import { globalResponseCache } from '../../responses/wsTypes';
 
 export async function handleResponses( c: Context, delegate: ( c: Context, endpoint: string ) => Promise<any> ) {
     return delegate( c, 'responses' );
@@ -60,6 +61,34 @@ export async function handleResponsesCompact( c: Context ) {
             output_tokens: 0,
             output_tokens_details: { reasoning_tokens: 0 },
             total_tokens: Math.ceil( JSON.stringify( output ).length / 4 ),
+        },
+    } );
+}
+
+/**
+ * GET /v1/responses/{id} — return a previously streamed/cached response.
+ * Rebuilds the same shape as response.completed from the global cache so a
+ * client re-fetch matches the streamed object exactly. 404 if unknown.
+ */
+export async function handleGetResponse( c: Context ) {
+    const id = c.req.param( 'id' ) ?? '';
+    const cached = globalResponseCache.get( id );
+    if ( !cached ) {
+        return c.json( { error: { message: `Response ${id} not found`, type: 'not_found_error' } }, 404 );
+    }
+    return c.json( {
+        id: cached.responseId ?? id,
+        object: 'response',
+        status: 'completed',
+        created: cached.created ?? 0,
+        model: cached.model,
+        output: cached.outputItems,
+        usage: {
+            input_tokens: 0,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 0,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 0,
         },
     } );
 }

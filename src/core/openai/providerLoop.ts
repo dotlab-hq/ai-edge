@@ -150,8 +150,7 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
                 if ( !response.ok ) {
                     lastFailure = { status: response.status, payload: await parseResponsePayload( response ) };
                     state.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                    console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name} — skipping streaming path` );
-                    if ( isStreamingResponses ) return { response: sendResponsesStreamError( selectedModel, lastFailure.payload?.error?.message || `Upstream returned ${response.status}` ) };
+                    console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
                     continue;
                 }
 
@@ -163,7 +162,6 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
                         lastFailure = { status: 200, payload: errorPayload };
                         state.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] upstream_error_in_body(stream) from ${config?.id ?? config?.name}` );
-                        if ( args.originalResponsesBody ) return { response: sendResponsesStreamError( selectedModel, typeof errorMsg === 'string' ? errorMsg : JSON.stringify( errorMsg ) ) };
                         continue;
                     }
                 }

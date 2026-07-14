@@ -61,6 +61,8 @@ export function setupResponsesWebSocket( server: Server ): void {
                 return;
             }
 
+            if ( process.env.AI_EDGE_DEBUG === '1' ) console.log( `[ws:responses] ← raw msg=${JSON.stringify( msg ).slice( 0, 2000 )}` );
+
             if ( msg.type === 'response.create' ) {
                 conn.queuedMessages.push( msg );
                 processQueue( conn );

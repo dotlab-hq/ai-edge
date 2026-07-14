@@ -1,4 +1,5 @@
 import type { WSConnection } from './wsTypes';
+import { globalResponseCache } from './wsTypes';
 import { convertResponsesRequestToChat } from './requestToChat';
 import { convertChatResponseToResponses } from './chatToResponses';
 import {
@@ -14,7 +15,10 @@ import { streamUpstreamToWebSocket } from './wsStream';
 import { openAIProxy } from '../OpenAIProxy';
 
 export async function handleResponseCreate( conn: WSConnection, msg: any ): Promise<void> {
-    const { stream: _stream, background: _background, ...payload } = msg;
+    const { stream: _stream, background: _background, response, ...rest } = msg;
+    // ponytail: OpenAI nests request fields under `response`; merge so nested wins, top-level kept for backward compat.
+    const payload = response ? { ...rest, ...response } : rest;
+    if ( process.env.AI_EDGE_DEBUG === '1' ) console.log( `[ws:responses] ← flattened payload=${JSON.stringify( payload ).slice( 0, 2000 )}` );
     const isWarmup = payload.generate === false;
     const prevId = payload.previous_response_id || null;
     const newInput = normaliseInput( payload.input );
@@ -31,6 +35,8 @@ export async function handleResponseCreate( conn: WSConnection, msg: any ): Prom
 
     let fullInput: any[];
     let chatBody: any;
+    // ponytail: Codex sends chat `messages` to /v1/responses — use directly, skip Responses conversion.
+    const isChatFormat = !payload.input && Array.isArray( payload.messages );
 
     if ( prevId ) {
         const cached = conn.responseCache.get( prevId );
@@ -54,21 +60,25 @@ export async function handleResponseCreate( conn: WSConnection, msg: any ): Prom
         if ( cached.instructions ) {
             mergedPayload.instructions = cached.instructions;
         }
-        chatBody = convertResponsesRequestToChat( mergedPayload );
+        chatBody = isChatFormat ? payload : convertResponsesRequestToChat( mergedPayload );
     } else {
-        fullInput = newInput;
-        chatBody = convertResponsesRequestToChat( payload );
+        fullInput = isChatFormat ? payload.messages : newInput;
+        chatBody = isChatFormat ? payload : convertResponsesRequestToChat( payload );
     }
 
     const responseId = generateResponseId();
 
     if ( isWarmup ) {
-        conn.responseCache.set( responseId, {
+        const cached: any = {
             inputItems: fullInput,
             outputItems: [],
             model,
             instructions: payload.instructions,
-        } );
+            responseId,
+            created: Math.floor( Date.now() / 1000 ),
+        };
+        conn.responseCache.set( responseId, cached );
+        globalResponseCache.set( responseId, cached );
         emitJson( conn, {
             type: 'response.created',
             response: {
@@ -156,12 +166,14 @@ export async function handleResponseCreate( conn: WSConnection, msg: any ): Prom
 
     const outputItems = responsesPayload.output as any[] ?? [];
     const cachedInstructions = prevId ? conn.responseCache.get( prevId )?.instructions : undefined;
-    conn.responseCache.set( responseId, {
+    const cached: any = {
         inputItems: fullInput,
         outputItems,
         model,
         instructions: cachedInstructions ?? payload.instructions,
-    } );
+    };
+    conn.responseCache.set( responseId, cached );
+    globalResponseCache.set( responseId, cached );
     trimResponseCache( conn );
 
     emitEvent( conn, 'response.created', {
