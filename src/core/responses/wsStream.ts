@@ -1,16 +1,20 @@
 import {
     createResponsesStreamState,
     sseEventsToWsFrames,
+    emitResponsesEvent,
+    finishResponsesStream,
 } from './streamState';
 import {
     processChatStreamChunkForResponses,
 } from './streamChunk';
+import { generateId } from './helpers';
 import {
     emitResponsesCompleted,
     buildStreamOutputItems,
 } from './events';
 import type { ResponsesStreamState } from './types';
 import type { WSConnection } from './wsTypes';
+import { globalResponseCache } from './wsTypes';
 import { isWsOpen, safeSend, isCriticalWsFrame, emitEvent } from './wsContext';
 
 export async function streamUpstreamToWebSocket(
@@ -61,12 +65,74 @@ export async function streamUpstreamToWebSocket(
         } catch { /* best-effort */ }
 
         try {
+            // ponytail: always close any open reasoning/text block so output is well-formed
+            if ( !responsesState.finished ) {
+                const closeOut: string[] = [];
+                processChatStreamChunkForResponses( null, responsesState, closeOut );
+                for ( const frame of sseEventsToWsFrames( closeOut ) ) {
+                    safeSend( conn.ws, frame, { critical: true } );
+                }
+            }
+        } catch { /* best-effort */ }
+
+        try {
+            // ponytail: if model only did reasoning (no text), synthesize a message
+            // so clients see a response instead of treating the result as empty.
+            if ( responsesState.textItems.length === 0 && responsesState.reasoningItems.length > 0 ) {
+                const summaryText = responsesState.reasoningItems.map( ( r ) => r.text ).join( '\n' ).trim()
+                    || 'Reasoning completed. No final output was produced.';
+                const itemId = generateId( 'msg' );
+                responsesState.textItems.push( { itemId, text: summaryText } );
+                const out: string[] = [];
+                emitResponsesEvent( out, 'response.output_item.added', {
+                    type: 'response.output_item.added',
+                    output_index: responsesState.currentOutputIndex,
+                    item: { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [] },
+                } );
+                emitResponsesEvent( out, 'response.content_part.added', {
+                    type: 'response.content_part.added',
+                    output_index: responsesState.currentOutputIndex,
+                    content_index: 0,
+                    part: { type: 'output_text', text: '' },
+                } );
+                emitResponsesEvent( out, 'response.output_text.delta', {
+                    type: 'response.output_text.delta',
+                    output_index: responsesState.currentOutputIndex,
+                    content_index: 0,
+                    delta: summaryText,
+                } );
+                emitResponsesEvent( out, 'response.content_part.done', {
+                    type: 'response.content_part.done',
+                    output_index: responsesState.currentOutputIndex,
+                    content_index: 0,
+                    part: { type: 'output_text', text: summaryText },
+                } );
+                emitResponsesEvent( out, 'response.output_item.done', {
+                    type: 'response.output_item.done',
+                    output_index: responsesState.currentOutputIndex,
+                    item: {
+                        id: itemId,
+                        type: 'message',
+                        role: 'assistant',
+                        status: 'completed',
+                        content: [ { type: 'output_text', text: summaryText, annotations: [] } ],
+                    },
+                } );
+                responsesState.currentOutputIndex++;
+                responsesState.contentBlockIndex = 0;
+                for ( const frame of sseEventsToWsFrames( out ) ) {
+                    safeSend( conn.ws, frame, { critical: true } );
+                }
+            }
+        } catch { /* best-effort */ }
+
+        try {
             const completedOut: string[] = [];
             emitResponsesCompleted( responsesState, completedOut );
             for ( const frame of sseEventsToWsFrames( completedOut ) ) {
                 safeSend( conn.ws, frame, { critical: true } );
             }
-            console.info( `[ws:responses] response_completed_emitted provider=${providerId} model=${selectedModel} responseId=${responseId}` );
+            console.info( `[ws:responses] response_completed_emitted provider=${providerId} model=${selectedModel} responseId=${responseId} textItems=${responsesState.textItems.length} reasoningItems=${responsesState.reasoningItems.length}` );
         } catch ( completedErr: any ) {
             console.error( `[ws:responses] Failed to emit response.completed: ${completedErr?.message || String( completedErr )}` );
             try {
@@ -116,6 +182,7 @@ export async function streamUpstreamToWebSocket(
 
             const { done, value } = await reader.read();
             if ( done ) break;
+            if ( process.env.AI_EDGE_DEBUG === '1' ) console.log( `[ws:responses] chunk len=${value?.length ?? 0} bufLen=${sseBuffer.length}` );
 
             if ( value && !firstChunkLogged ) {
                 firstChunkLogged = true;
@@ -210,12 +277,16 @@ export async function streamUpstreamToWebSocket(
         emitCompleted();
 
         const outputItems = buildStreamOutputItems( responsesState );
-        conn.responseCache.set( responseId, {
+        const cached: any = {
             inputItems: fullInput,
             outputItems,
             model,
             instructions,
-        } );
+            responseId,
+            created: responsesState.created,
+        };
+        conn.responseCache.set( responseId, cached );
+        globalResponseCache.set( responseId, cached );
 
         if ( clientConnected ) {
             console.info( `[ws:responses] stream_complete provider=${providerId} model=${selectedModel} responseId=${responseId}` );

@@ -21,6 +21,7 @@ export function processChatStreamChunkForResponses(
 
     // Handle [DONE] sentinel
     if ( chunk === null ) {
+        flushReasoningBuffer( state, out );
         finishResponsesStream( state, out );
         return true;
     }
@@ -80,12 +81,14 @@ export function processChatStreamChunkForResponses(
                 if ( last ) last.text += reasoningContent;
             }
 
-            emitResponsesEvent( out, 'response.reasoning_summary_text.delta', {
-                type: 'response.reasoning_summary_text.delta',
-                output_index: state.currentOutputIndex,
-                content_index: state.contentBlockIndex,
-                delta: reasoningContent,
-            } );
+            // ponytail: batch reasoning deltas — emit every ~80 chars so client gets live updates
+            // without flooding WS buffers with one-char frames.
+            state.reasoningBuffer = ( state.reasoningBuffer ?? '' ) + reasoningContent;
+            if ( state.reasoningBuffer.length >= 80 ) {
+                flushReasoningBuffer( state, out );
+            }
+        } else {
+            flushReasoningBuffer( state, out );
         }
 
         const content = delta.content as string | undefined;
@@ -152,6 +155,7 @@ export function processChatStreamChunkForResponses(
 
     // Handle finish_reason — check regardless of whether delta exists
     if ( finishReason && finishReason !== 'null' ) {
+        flushReasoningBuffer( state, out );
         closeReasoningBlock( state, out );
         if ( state.currentTextBlockOpen ) {
             const lastTextItem = state.textItems[state.textItems.length - 1];
@@ -169,10 +173,13 @@ export function processChatStreamChunkForResponses(
                 type: 'response.output_item.done',
                 output_index: state.currentOutputIndex,
                 item: {
+                    id: lastTextItem?.itemId,
                     type: 'message',
                     role: 'assistant',
                     status: 'completed',
-                    content: [],
+                    content: accumulatedText
+                        ? [ { type: 'output_text', text: accumulatedText, annotations: [] } ]
+                        : [],
                 },
             } );
             state.currentOutputIndex++;
@@ -185,4 +192,17 @@ export function processChatStreamChunkForResponses(
     }
 
     return false;
+}
+
+/** Flush any accumulated reasoning buffer as a single delta frame. */
+function flushReasoningBuffer( state: ResponsesStreamState, out: string[] ): void {
+    const buf = state.reasoningBuffer;
+    if ( !buf ) return;
+    state.reasoningBuffer = '';
+    emitResponsesEvent( out, 'response.reasoning_summary_text.delta', {
+        type: 'response.reasoning_summary_text.delta',
+        output_index: state.currentOutputIndex,
+        content_index: state.contentBlockIndex,
+        delta: buf,
+    } );
 }

@@ -501,4 +501,43 @@ async function main(): Promise<void> {
     process.exit( failed > 0 ? 1 : 0 );
 }
 
+// ─── Converter unit check (no live server needed) ───────────
+// Regression: message output_item.done must carry the item id and the
+// accumulated text, otherwise clients (Codex) treat the item as empty.
+import { createResponsesStreamState } from '../src/core/responses/streamState';
+import { processChatStreamChunkForResponses } from '../src/core/responses/streamChunk';
+import { buildResponsesCompletedResponse } from '../src/core/responses/events';
+
+function testConverterMessageDone(): void {
+    console.log( '\n[*] Message output_item.done carries id + content' );
+
+    const state = createResponsesStreamState( { model: 'gpt-4o' }, 0 );
+    const out: string[] = [];
+
+    // streaming text deltas
+    processChatStreamChunkForResponses( { choices: [ { delta: { content: '2 + 2 = 4' } } ] }, state, out );
+    // finish
+    processChatStreamChunkForResponses( { choices: [ { delta: {}, finish_reason: 'stop' } ] }, state, out );
+
+    const frames = out.map( ( s ) => {
+        const m = s.match( /data: (\{.*\})\n/ );
+        return m ? JSON.parse( m[1] ) : null;
+    } ).filter( Boolean );
+
+    const done = frames.find( ( f ) => f.type === 'response.output_item.done' && f.item?.type === 'message' );
+    assert( !!done, 'Message output_item.done was emitted' );
+    assert( !!done?.item?.id, 'Message output_item.done includes an id' );
+    assert(
+        Array.isArray( done?.item?.content ) && done?.item?.content?.[0]?.text === '2 + 2 = 4',
+        'Message output_item.done content matches streamed text',
+    );
+
+    const completedMsg = buildResponsesCompletedResponse( state ).output.find( ( i: any ) => i.type === 'message' );
+    assert(
+        done?.item?.id === completedMsg?.id && JSON.stringify( done?.item?.content ) === JSON.stringify( completedMsg?.content ),
+        'output_item.done matches response.completed output for the same message',
+    );
+}
+
+testConverterMessageDone();
 main();

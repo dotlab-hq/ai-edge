@@ -29,6 +29,11 @@ export async function handleOpenAIRequest( c: Context, state: BackendState, endp
     }
 
     if ( endpoint === 'responses' ) {
+        // ponytail: Codex sends chat format to /v1/responses — skip request conversion
+        // but keep originalResponsesBody so the response is converted back to Responses format.
+        if ( normalizedBody.messages && !normalizedBody.input ) {
+            return runProxyRequest( { c, state, endpoint: 'chat/completions', rawBody: normalizedBody, originalResponsesBody: normalizedBody } ).then( r => r.response );
+        }
         const fileSearchContext = await prepareFileSearchForResponses( normalizedBody );
         const converted = convertResponsesRequestToChat( fileSearchContext.body );
         return runProxyRequest( { c, state, endpoint: 'chat/completions', rawBody: converted, originalResponsesBody: normalizedBody, fileSearchCalls: fileSearchContext.searchCalls } )

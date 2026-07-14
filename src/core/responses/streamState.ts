@@ -21,6 +21,7 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         toolCalls: [],
         reasoningItems: [],
         currentReasoningBlockOpen: false,
+        reasoningBuffer: '',
         fileSearchCalls: [],
     };
 }
@@ -142,7 +143,15 @@ export function finishResponsesStream( state: ResponsesStreamState, out: string[
         emitResponsesEvent( out, 'response.output_item.done', {
             type: 'response.output_item.done',
             output_index: state.currentOutputIndex,
-            item: { type: 'message', role: 'assistant', status: 'completed', content: [] },
+            item: {
+                id: lastTextItem?.itemId,
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: accumulatedText
+                    ? [ { type: 'output_text', text: accumulatedText, annotations: [] } ]
+                    : [],
+            },
         } );
         state.currentOutputIndex++;
         state.contentBlockIndex = 0;

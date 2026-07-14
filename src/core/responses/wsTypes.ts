@@ -10,6 +10,8 @@ export interface CachedResponse {
     outputItems: any[];
     model: string;
     instructions?: string;
+    responseId?: string;
+    created?: number;
 }
 
 export interface WSConnection {
@@ -20,3 +22,8 @@ export interface WSConnection {
     inFlight: boolean;
     responseCache: Map<string, CachedResponse>;
 }
+
+// ponytail: global cache shared between the WS stream (writer) and the
+// HTTP GET /v1/responses/{id} endpoint (reader), so a re-fetched response
+// matches the streamed one. Per-conn cache stays for in-flight lookups.
+export const globalResponseCache = new Map<string, CachedResponse>();
