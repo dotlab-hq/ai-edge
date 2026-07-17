@@ -19,6 +19,14 @@ jobs:
         steps:
             - name: Checkout repository
               uses: actions/checkout@v6
+              with:
+                  lfs: true
+
+            - name: Verify bundled Rampart model
+              shell: bash
+              run: |
+                  test -f models/rampart/onnx/model_q4.onnx
+                  test "$(stat -c%s models/rampart/onnx/model_q4.onnx)" -gt 1000000
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@v1
