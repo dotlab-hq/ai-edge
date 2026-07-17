@@ -656,6 +656,11 @@
                 "description": "If true, this provider is reserved for text-to-speech routing (audio/speech) and excluded from chat/completions/responses/embeddings fallback",
                 "type": "boolean"
               },
+              "PII_Rampart": {
+                "default": true,
+                "description": "Apply Rampart PII protection to text-generation requests and responses only; excluded from image, audio, and vector-store routes",
+                "type": "boolean"
+              },
               "individualLimit": {
                 "default": false,
                 "type": "boolean"
@@ -748,6 +753,7 @@
               "embeddings",
               "stt",
               "tts",
+              "PII_Rampart",
               "individualLimit",
               "baseUrl",
               "apiKey",
@@ -977,6 +983,11 @@
                 "default": false,
                 "type": "boolean"
               },
+              "PII_Rampart": {
+                "default": true,
+                "description": "Apply Rampart PII protection to text-generation requests and responses only; excluded from image, audio, and vector-store routes",
+                "type": "boolean"
+              },
               "baseUrl": {
                 "type": "string",
                 "format": "uri"
@@ -1063,6 +1074,7 @@
               "name",
               "models",
               "individualLimit",
+              "PII_Rampart",
               "baseUrl",
               "apiKey",
               "randomRouting"
