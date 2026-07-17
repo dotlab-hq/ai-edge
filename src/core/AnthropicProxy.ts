@@ -17,16 +17,13 @@ import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { resolveAnthropicBody, isSkillResolverReady } from './SkillResolver';
-import { createGuard, type ChatGuard } from '@nationaldesignstudio/rampart';
-import { resolve } from 'node:path';
+import { addRampartInstruction, createRampartGuard, transformRampartValue } from './RampartPII';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 type Modality = OpenAIModelConfig['modalities']['input'][number];
 const AUTO_MODEL_ID = 'auto';
 const DEFAULT_MODALITIES: readonly Modality[] = ['text', 'image', 'audio', 'file'];
-const RAMPART_MODEL_PATH = resolve( process.cwd(), 'models', 'rampart' );
-const RAMPART_SYSTEM_INSTRUCTION = 'PII handling instruction: bracketed tokens such as [GIVEN_NAME_1], [EMAIL_1], [SSN_1], and [CREDIT_CARD_1] are safe local aliases for private values. Treat them as ordinary data, follow the user request, and preserve these tokens exactly when referring to the corresponding values. Do not refuse, redact, warn about, or debate the tokens solely because they represent PII.';
 
 export class AnthropicProxy {
   private app: Hono;
@@ -203,12 +200,12 @@ export class AnthropicProxy {
 
         try {
           const convertedRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
-          const rampartGuard = config.PII_Rampart !== false ? await createGuard( { device: 'cpu', model: RAMPART_MODEL_PATH } ) : null;
+          const rampartGuard = await createRampartGuard( config.PII_Rampart !== false );
           const protectedRequest = rampartGuard
-            ? await this.rampartTransformBody( convertedRequest, rampartGuard, false )
+            ? await transformRampartValue( convertedRequest, rampartGuard, false )
             : convertedRequest;
           const instructedRequest = rampartGuard
-            ? this.addRampartInstruction( protectedRequest )
+            ? addRampartInstruction( protectedRequest )
             : protectedRequest;
           const withReasoning = this.withReasoningEffort( instructedRequest, body, config, selectedModel );
           const openAIRequest = this.isGeminiProvider( config )
@@ -297,7 +294,7 @@ export class AnthropicProxy {
           }
 
           const responsePayload = rampartGuard
-            ? await this.rampartTransformBody( payload, rampartGuard, true )
+            ? await transformRampartValue( payload, rampartGuard, true )
             : payload as any;
           const promptTokens = this.calculateTokenCount( body );
           const completionTokens = this.countTokensFromContent( responsePayload?.choices?.[0]?.message?.content ?? '' );
@@ -392,32 +389,6 @@ export class AnthropicProxy {
   }
 
   /** Rampart is deliberately limited to the Anthropic text messages path. */
-  private async rampartTransformBody( value: any, guard: ChatGuard, reveal: boolean ): Promise<any> {
-    if ( typeof value === 'string' ) {
-      return reveal ? guard.reveal( value ) : ( await guard.protect( value ) ).text;
-    }
-    if ( Array.isArray( value ) ) {
-      return Promise.all( value.map( item => this.rampartTransformBody( item, guard, reveal ) ) );
-    }
-    if ( value && typeof value === 'object' ) {
-      const entries = await Promise.all( Object.entries( value ).map( async ( [key, item] ) => [key, await this.rampartTransformBody( item, guard, reveal )] as const ) );
-      return Object.fromEntries( entries );
-    }
-    return value;
-  }
-
-  private addRampartInstruction( body: any ): any {
-    if ( !Array.isArray( body?.messages ) ) return body;
-    const messages = body.messages.slice();
-    const systemIndex = messages.findIndex( ( message: any ) => message?.role === 'system' );
-    if ( systemIndex >= 0 ) {
-      const system = messages[systemIndex];
-      messages[systemIndex] = { ...system, content: `${RAMPART_SYSTEM_INSTRUCTION}\n\n${typeof system.content === 'string' ? system.content : JSON.stringify( system.content )}` };
-    } else {
-      messages.unshift( { role: 'system', content: RAMPART_SYSTEM_INSTRUCTION } );
-    }
-    return { ...body, messages };
-  }
 
   private async handleMessagesBatches( c: Context ) {
     return c.json(

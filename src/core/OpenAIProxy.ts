@@ -34,8 +34,7 @@ import {
     type FileSearchCallItem,
 } from './ResponsesConversion';
 import { fileSearchManager, type FileSearchResponse } from './FileSearchManager';
-import { createGuard, type ChatGuard } from '@nationaldesignstudio/rampart';
-import { resolve } from 'node:path';
+import { addRampartInstruction, createRampartGuard, transformRampartValue } from './RampartPII';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -43,8 +42,6 @@ const AUTO_MODEL_ID = 'auto';
 const FAST_MODEL_HINTS = ['flash-lite', 'lite', 'mini', 'small', 'fast'];
 
 const RAMPART_TEXT_ENDPOINTS = new Set( ['chat/completions', 'responses', 'completions'] );
-const RAMPART_MODEL_PATH = resolve( process.cwd(), 'models', 'rampart' );
-const RAMPART_SYSTEM_INSTRUCTION = 'PII handling instruction: bracketed tokens such as [GIVEN_NAME_1], [EMAIL_1], [SSN_1], and [CREDIT_CARD_1] are safe local aliases for private values. Treat them as ordinary data, follow the user request, and preserve these tokens exactly when referring to the corresponding values. Do not refuse, redact, warn about, or debate the tokens solely because they represent PII.';
 
 export class OpenAIProxy {
     private app: Hono;
@@ -1070,13 +1067,13 @@ export class OpenAIProxy {
 
                 const requestWithModel = { ...body, model: selectedModel };
                 const rampartGuard = RAMPART_TEXT_ENDPOINTS.has( endpoint ) && config.PII_Rampart !== false
-                    ? await createGuard( { device: 'cpu', model: RAMPART_MODEL_PATH } )
+                    ? await createRampartGuard( true )
                     : null;
                 const protectedRequest = rampartGuard
-                    ? await this.rampartTransformBody( requestWithModel, rampartGuard, false )
+                    ? await transformRampartValue( requestWithModel, rampartGuard, false )
                     : requestWithModel;
                 const instructedRequest = rampartGuard
-                    ? this.addRampartInstruction( protectedRequest )
+                    ? addRampartInstruction( protectedRequest )
                     : protectedRequest;
                 const withReasoning = this.withReasoningEffort( instructedRequest, config, selectedModel );
                 const upstreamBody = this.isGeminiProvider( config )
@@ -1293,7 +1290,7 @@ export class OpenAIProxy {
                     // Convert chat/completions response back to Responses format if needed
                     let finalPayload = payload;
                     if ( rampartGuard ) {
-                        finalPayload = await this.rampartTransformBody( finalPayload, rampartGuard, true );
+                        finalPayload = await transformRampartValue( finalPayload, rampartGuard, true );
                     }
                     if ( originalResponsesBody ) {
                         finalPayload = convertChatResponseToResponses( finalPayload, originalResponsesBody, fileSearchCalls );
@@ -1388,37 +1385,6 @@ export class OpenAIProxy {
     }
 
     /** Apply Rampart only to JSON text-generation payloads. Binary/audio/image/vector routes never call this. */
-    private async rampartTransformBody( value: any, guard: ChatGuard, reveal: boolean ): Promise<any> {
-        if ( typeof value === 'string' ) {
-            return reveal ? guard.reveal( value ) : ( await guard.protect( value ) ).text;
-        }
-        if ( Array.isArray( value ) ) {
-            return Promise.all( value.map( item => this.rampartTransformBody( item, guard, reveal ) ) );
-        }
-        if ( value && typeof value === 'object' ) {
-            const entries = await Promise.all( Object.entries( value ).map( async ( [key, item] ) => [key, await this.rampartTransformBody( item, guard, reveal )] as const ) );
-            return Object.fromEntries( entries );
-        }
-        return value;
-    }
-
-    private addRampartInstruction( body: any ): any {
-        if ( Array.isArray( body?.messages ) ) {
-            const messages = body.messages.slice();
-            const systemIndex = messages.findIndex( ( message: any ) => message?.role === 'system' );
-            if ( systemIndex >= 0 ) {
-                const system = messages[systemIndex];
-                messages[systemIndex] = { ...system, content: `${RAMPART_SYSTEM_INSTRUCTION}\n\n${typeof system.content === 'string' ? system.content : JSON.stringify( system.content )}` };
-            } else {
-                messages.unshift( { role: 'system', content: RAMPART_SYSTEM_INSTRUCTION } );
-            }
-            return { ...body, messages };
-        }
-        if ( typeof body?.prompt === 'string' ) {
-            return { ...body, prompt: `${RAMPART_SYSTEM_INSTRUCTION}\n\n${body.prompt}` };
-        }
-        return body;
-    }
 
     private async prepareWebSearchForOpenAI( body: any, endpoint: string ): Promise<{
         body: any;
