@@ -10,8 +10,15 @@ export const RAMPART_MODEL_PATH = existsSync( packageModelPath ) ? packageModelP
 
 const RAMPART_SYSTEM_INSTRUCTION = 'PII handling instruction: bracketed tokens such as [GIVEN_NAME_1], [EMAIL_1], [SSN_1], and [CREDIT_CARD_1] are safe local aliases for private values. Treat them as ordinary data, follow the user request, and preserve these tokens exactly when referring to the corresponding values. Do not refuse, redact, warn about, or debate the tokens solely because they represent PII.';
 
+let rampartGuardPromise: Promise<ChatGuard> | null = null;
+
 export async function createRampartGuard( enabled: boolean ): Promise<ChatGuard | null> {
-  return enabled ? createGuard( { device: 'cpu', model: RAMPART_MODEL_PATH } ) : null;
+  // Rampart loads an ONNX model into native memory. Cache the guard so the
+  // model is initialized once and reused by all requests.
+  const globallyDisabled = /^(1|true|yes)$/i.test( process.env.AI_EDGE_DISABLE_RAMPART?.trim() ?? '' );
+  if ( !enabled || globallyDisabled ) return null;
+  rampartGuardPromise ??= createGuard( { device: 'cpu', model: RAMPART_MODEL_PATH } );
+  return rampartGuardPromise;
 }
 
 export async function transformRampartValue( value: any, guard: ChatGuard, reveal: boolean ): Promise<any> {
