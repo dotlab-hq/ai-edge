@@ -1,7 +1,12 @@
 import { resolve } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { createGuard, type ChatGuard } from '@nationaldesignstudio/rampart';
 
-export const RAMPART_MODEL_PATH = resolve( process.cwd(), 'models', 'rampart' );
+const packageModelPath = resolve( dirname( fileURLToPath( import.meta.url ) ), '..', 'models', 'rampart' );
+const workingDirectoryModelPath = resolve( process.cwd(), 'models', 'rampart' );
+export const RAMPART_MODEL_PATH = existsSync( packageModelPath ) ? packageModelPath : workingDirectoryModelPath;
 
 const RAMPART_SYSTEM_INSTRUCTION = 'PII handling instruction: bracketed tokens such as [GIVEN_NAME_1], [EMAIL_1], [SSN_1], and [CREDIT_CARD_1] are safe local aliases for private values. Treat them as ordinary data, follow the user request, and preserve these tokens exactly when referring to the corresponding values. Do not refuse, redact, warn about, or debate the tokens solely because they represent PII.';
 
