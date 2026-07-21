@@ -34,7 +34,6 @@ import {
     type FileSearchCallItem,
 } from './ResponsesConversion';
 import { fileSearchManager, type FileSearchResponse } from './FileSearchManager';
-import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -134,7 +133,7 @@ export class OpenAIProxy {
 
         // Summarize dropped items into a summary message if any were dropped
         const droppedCount = conversationItems.length - keptConversation.length;
-        const output: any[] = [ ...systemItems ];
+        const output: any[] = [...systemItems];
 
         if ( droppedCount > 0 ) {
             output.push( {
@@ -286,14 +285,14 @@ export class OpenAIProxy {
                         // Collect all fields to forward into a raw multipart body.
                         // Hono-parsed File objects don't serialize correctly through undici FormData,
                         // so we build multipart/form-data manually as a Buffer.
-                        const boundary = `----AIEDGE${ Math.random().toString( 36 ).slice( 2 ) }`;
+                        const boundary = `----AIEDGE${Math.random().toString( 36 ).slice( 2 )}`;
                         const parts: ( string | Buffer )[] = [];
 
                         function appendText( name: string, value: string ) {
                             parts.push(
-                                `--${ boundary }\r\n`,
-                                `Content-Disposition: form-data; name="${ name }"\r\n\r\n`,
-                                `${ value }\r\n`,
+                                `--${boundary}\r\n`,
+                                `Content-Disposition: form-data; name="${name}"\r\n\r\n`,
+                                `${value}\r\n`,
                             );
                         }
 
@@ -304,15 +303,15 @@ export class OpenAIProxy {
                         const fileName = file.name || 'audio.wav';
                         const fileType = file.type || 'audio/wav';
                         parts.push(
-                            `--${ boundary }\r\n`,
-                            `Content-Disposition: form-data; name="file"; filename="${ fileName }"\r\n`,
-                            `Content-Type: ${ fileType }\r\n\r\n`,
+                            `--${boundary}\r\n`,
+                            `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`,
+                            `Content-Type: ${fileType}\r\n\r\n`,
                             fileBuffer,
                             `\r\n`,
                         );
 
                         // Forward all optional fields
-                        const textFields = [ 'language', 'prompt', 'response_format', 'temperature' ] as const;
+                        const textFields = ['language', 'prompt', 'response_format', 'temperature'] as const;
                         for ( const field of textFields ) {
                             const val = formData.get( field );
                             if ( val ) appendText( field, val as string );
@@ -346,7 +345,7 @@ export class OpenAIProxy {
                             appendText( 'known_speaker_references[]', ref as string );
                         }
 
-                        parts.push( `--${ boundary }--\r\n` );
+                        parts.push( `--${boundary}--\r\n` );
                         const upstreamBody = Buffer.concat( parts.map( p => typeof p === 'string' ? Buffer.from( p ) : p ) );
 
                         console.info( `[${endpoint}] upstream_request provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds} stream=${wantsStream}` );
@@ -355,7 +354,7 @@ export class OpenAIProxy {
                             method: 'POST',
                             headers: {
                                 'Authorization': `Bearer ${config.apiKey}`,
-                                'Content-Type': `multipart/form-data; boundary=${ boundary }`,
+                                'Content-Type': `multipart/form-data; boundary=${boundary}`,
                                 'User-Agent': 'ai-edge/1.0',
                             },
                             body: upstreamBody,
@@ -366,7 +365,7 @@ export class OpenAIProxy {
                         if ( upstreamResponse.status === 429 ) {
                             this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
                             console.warn( `[${endpoint}] 429 from ${config.id}, trying next backend` );
-                            continue;
+                            break;
                         }
 
                         if ( !upstreamResponse.ok ) {
@@ -376,7 +375,7 @@ export class OpenAIProxy {
                             };
                             this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
                             console.error( `[${endpoint}] ${upstreamResponse.status} from ${config?.id ?? config?.name}` );
-                            continue;
+                            break;
                         }
 
                         // Handle streaming SSE response (transcript.text.delta / transcript.text.done)
@@ -418,7 +417,7 @@ export class OpenAIProxy {
                             }
                         };
                         console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
-                        continue;
+                        break;
                     }
                 }
             }
@@ -548,7 +547,7 @@ export class OpenAIProxy {
             shimmer: 'autumn',
         };
 
-        return openaiToOrpheus[ lower ] ?? 'troy';
+        return openaiToOrpheus[lower] ?? 'troy';
     }
 
     /**
@@ -594,7 +593,7 @@ export class OpenAIProxy {
         const clientSignal = c.req.raw.signal;
         const onClientAbort = () => {
             clientDisconnected = true;
-            upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
+            upstreamReader.cancel( 'client disconnected' ).catch( () => { } );
         };
         clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
@@ -747,7 +746,7 @@ export class OpenAIProxy {
                         if ( upstreamResponse.status === 429 ) {
                             this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
                             console.warn( `[${endpoint}] 429 from ${config.id}, trying next backend` );
-                            continue;
+                            break;
                         }
 
                         if ( !upstreamResponse.ok ) {
@@ -757,7 +756,7 @@ export class OpenAIProxy {
                             };
                             this.providerStats.recordFailure( config.id, selectedModel, Date.now() - requestStartedAt );
                             console.error( `[${endpoint}] ${upstreamResponse.status} from ${config?.id ?? config?.name}` );
-                            continue;
+                            break;
                         }
 
                         const upstreamContentType = upstreamResponse.headers.get( 'content-type' ) || 'application/octet-stream';
@@ -783,7 +782,7 @@ export class OpenAIProxy {
                                 wav: 'audio/wav',
                                 pcm: 'audio/pcm',
                             };
-                            const contentType = mimeMap[ responseFormat ] || 'audio/mpeg';
+                            const contentType = mimeMap[responseFormat] || 'audio/mpeg';
 
                             // Pipe the audio stream directly to the client
                             const clientSignal = c.req.raw.signal;
@@ -791,7 +790,7 @@ export class OpenAIProxy {
                             const upstreamReader = upstreamResponse.body!.getReader();
                             const onClientAbort = () => {
                                 clientDisconnected = true;
-                                upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
+                                upstreamReader.cancel( 'client disconnected' ).catch( () => { } );
                             };
                             clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
@@ -839,7 +838,7 @@ export class OpenAIProxy {
                             wav: 'audio/wav',
                             pcm: 'audio/pcm',
                         };
-                        const contentType = mimeMap[ effectiveFormat ] || 'audio/mpeg';
+                        const contentType = mimeMap[effectiveFormat] || 'audio/mpeg';
 
                         console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} characters=${characters} totalMs=${Date.now() - requestStartedAt}` );
                         this.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
@@ -849,6 +848,7 @@ export class OpenAIProxy {
                     } catch ( error: any ) {
                         this.providerStats.recordFailure( config.id, selectedModel );
                         console.error( `[${endpoint}] error provider=${config.id} model=${selectedModel}: ${error?.message}` );
+                        break;
                     }
                 }
             }
@@ -1101,7 +1101,7 @@ export class OpenAIProxy {
                     backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
                     if ( response.status === 429 ) {
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                        continue;
+                        break;
                     }
 
                     if ( this.isRedirectStatus( response.status ) ) {
@@ -1132,7 +1132,7 @@ export class OpenAIProxy {
                         if ( isStreamingResponses ) {
                             return this.sendResponsesStreamError( selectedModel, lastFailure.payload?.error?.message || `Upstream returned ${response.status}` );
                         }
-                        continue;
+                        break;
                     }
 
                     // Some upstreams return HTTP 200 with a JSON error body
@@ -1152,7 +1152,7 @@ export class OpenAIProxy {
                             if ( originalResponsesBody ) {
                                 return this.sendResponsesStreamError( selectedModel, typeof errorMsg === 'string' ? errorMsg : JSON.stringify( errorMsg ) );
                             }
-                            continue;
+                            break;
                         }
                         // Non-error JSON response in streaming — unusual but
                         // fall through to let the normal non-streaming path
@@ -1199,7 +1199,7 @@ export class OpenAIProxy {
                                 const clientSignal = c.req.raw.signal;
                                 const onClientAbort = () => {
                                     clientDisconnected = true;
-                                    reader.cancel( 'client disconnected' ).catch( () => {} );
+                                    reader.cancel( 'client disconnected' ).catch( () => { } );
                                 };
                                 clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
@@ -1259,7 +1259,7 @@ export class OpenAIProxy {
                         };
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
-                        continue;
+                        break;
                     }
 
                     // Some upstreams return HTTP 200 with an error payload
@@ -1273,7 +1273,7 @@ export class OpenAIProxy {
                         };
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] upstream_error_in_body from ${config?.id ?? config?.name}: ${typeof errorMsg === 'string' ? errorMsg.slice( 0, 200 ) : JSON.stringify( errorMsg ).slice( 0, 200 )}` );
-                        continue;
+                        break;
                     }
 
                     // Convert chat/completions response back to Responses format if needed
@@ -1316,7 +1316,7 @@ export class OpenAIProxy {
                         }
                     };
                     console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
-                    continue;
+                    break;
                 }
             }
         }
@@ -1713,7 +1713,7 @@ export class OpenAIProxy {
 
         return {
             ...payload,
-            output: [ ...fscItems, ...output ],
+            output: [...fscItems, ...output],
         };
     }
 
@@ -1798,7 +1798,7 @@ export class OpenAIProxy {
                         }
                     };
                     console.error( `[${endpoint}] Code interpreter error from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
-                    continue;
+                    break;
                 }
             }
         }
@@ -2086,8 +2086,6 @@ export class OpenAIProxy {
             } else {
                 // chat/completions, completions, responses, and default/undefined → text only
                 if ( this.isSttOrImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) ) continue;
-                if ( !providerHasHealthyTextModel( config ) ) continue;
-                if ( matchesRequestedModel && !isTextModelHealthy( config.id, modelName ) ) continue;
             }
 
             if ( matchesRequestedModel ) {
@@ -2186,7 +2184,7 @@ export class OpenAIProxy {
         this.optimizedBackendCache.set( cacheKey, {
             backends: sorted,
             expiresAt: Date.now() + OpenAIProxy.BACKEND_CACHE_TTL_MS,
-        });
+        } );
 
         if ( this.optimizedBackendCache.size > OpenAIProxy.MAX_CACHE_SIZE ) {
             const firstKey = this.optimizedBackendCache.keys().next().value;
@@ -2230,7 +2228,7 @@ export class OpenAIProxy {
         if ( this.rrIndexByKey.size > OpenAIProxy.MAX_CACHE_SIZE ) {
             // Remove a random entry
             const keys = Array.from( this.rrIndexByKey.keys() );
-            const randomKey = keys[ Math.floor( Math.random() * keys.length ) ];
+            const randomKey = keys[Math.floor( Math.random() * keys.length )];
             this.rrIndexByKey.delete( randomKey! );
         }
 
@@ -2262,10 +2260,7 @@ export class OpenAIProxy {
         const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
         const filterHealthyText = ( models: string[] ): string[] => {
-            if ( this.isImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) || this.isSttEnabled( config ) || this.isTtsEnabled( config ) ) {
-                return models;
-            }
-            return models.filter( modelName => isTextModelHealthy( config.id, modelName ) );
+            return models;
         };
 
         if ( config.randomRouting === false && !isAutoModel ) {
@@ -2520,7 +2515,7 @@ export class OpenAIProxy {
         const clientSignal = c.req.raw.signal;
         const onClientAbort = () => {
             clientDisconnected = true;
-            upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
+            upstreamReader.cancel( 'client disconnected' ).catch( () => { } );
         };
         clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
@@ -2581,17 +2576,17 @@ export class OpenAIProxy {
                         try {
                             const fallback = [
                                 `event: response.completed\ndata: ${JSON.stringify( {
-                                type: 'response.completed',
-                                response: {
-                                    id: responsesState.responseId,
-                                    object: 'response',
-                                    status: 'completed',
-                                    created: responsesState.created,
-                                    model: responsesState.model,
-                                    output: [],
-                                    usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-                                },
-                            } )}\n\n`,
+                                    type: 'response.completed',
+                                    response: {
+                                        id: responsesState.responseId,
+                                        object: 'response',
+                                        status: 'completed',
+                                        created: responsesState.created,
+                                        model: responsesState.model,
+                                        output: [],
+                                        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+                                    },
+                                } )}\n\n`,
                                 'data: [DONE]\n\n',
                             ].join( '' );
                             controller.enqueue( encoder.encode( fallback ) );
@@ -3084,7 +3079,7 @@ export class OpenAIProxy {
                     if ( upstreamResponse.status === 429 ) {
                         this.providerStats.recordFailure( config.id, selectedModel );
                         console.warn( `[ws:${endpoint}] 429 from ${config.id}, trying next backend` );
-                        continue;
+                        break;
                     }
 
                     if ( this.isRedirectStatus( upstreamResponse.status ) ) {
@@ -3103,7 +3098,7 @@ export class OpenAIProxy {
                     if ( !upstreamResponse.ok ) {
                         this.providerStats.recordFailure( config.id, selectedModel );
                         console.error( `[ws:${endpoint}] ${upstreamResponse.status} from ${config.id} — trying next backend` );
-                        continue;
+                        break;
                     }
 
                     this.providerStats.recordSuccess( config.id, selectedModel );
@@ -3116,7 +3111,7 @@ export class OpenAIProxy {
                 } catch ( error: any ) {
                     this.providerStats.recordFailure( config.id, selectedModel );
                     console.error( `[ws:${endpoint}] Exception from ${config?.id}: ${error?.message || String( error )}` );
-                    continue;
+                    break;
                 }
             }
         }

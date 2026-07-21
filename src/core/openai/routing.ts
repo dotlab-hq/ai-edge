@@ -1,6 +1,5 @@
 import { stripFreeModifier } from '@/utils/modelIds';
 import { CONFIG } from '@/utils/schema.lookup';
-import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 import { FAST_MODEL_HINTS } from './types';
 import type { BackendState, OpenAIModelConfig } from './types';
 import {
@@ -75,8 +74,6 @@ export function getBackendsForModel(
         } else if ( isTextChatEndpoint( endpoint ) ) {
             // image_generation / image_editing providers must never serve text
             if ( isSttOrImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) ) continue;
-            if ( !providerHasHealthyTextModel( config ) ) continue;
-            if ( matchesRequestedModel && !isTextModelHealthy( config.id, modelName ) ) continue;
         }
 
         if ( matchesRequestedModel ) {
@@ -170,11 +167,7 @@ export function getCandidateModelsForProvider( state: BackendState, config: Open
     const isAutoModelFlag = explicitlyAuto || !modelInThisProvider;
 
     const filterHealthy = ( models: string[] ): string[] => {
-        // Probe only applies to text providers; specialized (image/stt/etc.) stay unfiltered here.
-        if ( isImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) || isSttEnabled( config ) || isTtsEnabled( config ) ) {
-            return models;
-        }
-        return models.filter( modelName => isTextModelHealthy( config.id, modelName ) );
+        return models;
     };
 
     if ( config.randomRouting === false && !isAutoModelFlag ) {

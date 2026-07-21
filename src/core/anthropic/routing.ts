@@ -1,6 +1,5 @@
 import { stripFreeModifier } from '@/utils/modelIds';
 import { configHasModel, isGeminiProvider, isImageOnlyConfig, isEmbeddingsEnabled, isSttEnabled, isTtsEnabled } from '../routing/shared';
-import { isTextModelHealthy } from '@/utils/textModelProbe';
 import { providerSupportsModalities, modelEntrySupportsModalities } from './helpers';
 
 type OpenAIModelConfig = any;
@@ -27,10 +26,7 @@ export function getCandidateModelsForProvider( config: OpenAIModelConfig, reques
     const isAuto = explicitlyAuto || !modelInThisProvider;
 
     const filterHealthyText = ( models: string[] ): string[] => {
-        if ( isImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) || isSttEnabled( config ) || isTtsEnabled( config ) ) {
-            return models;
-        }
-        return models.filter( modelName => isTextModelHealthy( config.id, modelName ) );
+        return models;
     };
 
     if ( config.randomRouting === false && !isAuto && providerSupportsModalities( config, requiredModalities ) ) {

@@ -17,7 +17,6 @@ import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { resolveAnthropicBody, isSkillResolverReady } from './SkillResolver';
-import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -448,14 +447,7 @@ export class AnthropicProxy {
         continue;
       }
 
-      if ( !providerHasHealthyTextModel( config ) ) {
-        continue;
-      }
-
       const matchesRequestedModel = this.configHasModel( config, modelName );
-      if ( matchesRequestedModel && !isTextModelHealthy( config.id, modelName ) ) {
-        continue;
-      }
 
       if ( matchesRequestedModel ) {
         exactBackends.push( config );
