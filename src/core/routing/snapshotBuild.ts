@@ -41,10 +41,12 @@ export function computeEndpointCapabilities( config: OpenAIModelConfig ): Routin
     const imageModels = config.imageModels;
     const imageGenerationEnabled = typeof imageModels === 'object' && imageModels?.image_generation === true;
     const imageEditingEnabled = typeof imageModels === 'object' && imageModels?.image_editing === true;
+    // Any image endpoint flag means this provider is image-only for routing purposes.
     const imageOnly = typeof imageModels === 'boolean'
         ? imageModels
         : imageGenerationEnabled || imageEditingEnabled;
-    const textEndpointsEnabled = !embeddingsEnabled && !imageOnly;
+    const sttOrTts = config.stt === true || config.tts === true;
+    const textEndpointsEnabled = !embeddingsEnabled && !imageOnly && !sttOrTts;
 
     return Object.freeze( {
         'chat/completions': textEndpointsEnabled,

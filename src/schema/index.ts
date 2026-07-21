@@ -24,9 +24,6 @@ const STTSchema = z.boolean( { error: 'stt must be a boolean' } ).optional().def
 
 const TTSSchema = z.boolean( { error: 'tts must be a boolean' } ).optional().default( false ).describe( 'If true, this provider is reserved for text-to-speech routing (audio/speech) and excluded from chat/completions/responses/embeddings fallback' )
 
-const PIIRampartSchema = z.boolean( { error: 'PII_Rampart must be a boolean' } ).optional().default( true ).describe( 'Apply Rampart PII protection to text-generation requests and responses only; excluded from image, audio, and vector-store routes' )
-const ProviderPrivacyFields = { PII_Rampart: PIIRampartSchema }
-
 const SpooferSchema = z.boolean( { error: 'spoofer must be a boolean' } ).optional().default( false ).describe( 'If true, randomly generated IP spoofing headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP, etc.) are added to every upstream request' )
 
 const ReasoningEffortSchema = z.enum( ['none', 'low', 'medium', 'high', 'xhigh', 'max'] )
@@ -64,7 +61,6 @@ const OpenAIModelSchema = z.object( {
   embeddings: EmbeddingsSchema,
   stt: STTSchema,
   tts: TTSSchema,
-  ...ProviderPrivacyFields,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
@@ -126,7 +122,6 @@ const AnthropicModelSchema = z.object( {
   models: z.array( z.union( [z.string( { error: 'each model must be a string' } ), ModelWithRateLimitSchema] ) ).min( 1, 'models array must contain at least one model' ),
   modalities: ModalitiesSchema,
   individualLimit: z.boolean( { error: 'individualLimit must be a boolean' } ).default( false ),
-  ...ProviderPrivacyFields,
   baseUrl: z.url( 'baseUrl must be a valid URL' ),
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,

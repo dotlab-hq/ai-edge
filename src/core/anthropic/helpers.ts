@@ -20,6 +20,24 @@ export function isSttOrTtsOnlyConfig( config: any ): boolean {
     return config.stt === true || config.tts === true;
 }
 
+/** image_generation / image_editing providers must not be used for text messages. */
+export function isImageOnlyConfig( config: any ): boolean {
+    const imageModels = config?.imageModels;
+    if ( typeof imageModels === 'boolean' ) {
+        return imageModels;
+    }
+    if ( typeof imageModels !== 'object' || !imageModels ) {
+        return false;
+    }
+    return imageModels.image_generation === true || imageModels.image_editing === true;
+}
+
+export function isNonTextChatConfig( config: any ): boolean {
+    return isSttOrTtsOnlyConfig( config )
+        || config?.embeddings === true
+        || isImageOnlyConfig( config );
+}
+
 export function providerSupportsModalities( config: any, requiredModalities: readonly string[] ): boolean {
     const providerModalities = new Set( config.modalities?.input ?? ['text', 'image', 'audio', 'file'] );
     return requiredModalities.every( ( modality ) => providerModalities.has( modality ) )

@@ -17,13 +17,14 @@ import { resolveAnthropicBody, isSkillResolverReady } from '../SkillResolver';
 import { handleModels, handleMessages, handleMessagesBatches } from './handlers';
 import {
     isAutoModel, configHasModel, isEmbeddingsEnabled, isSttOrTtsOnlyConfig,
-    providerSupportsModalities, stripReasoningFields, hasExplicitReasoningRequest,
+    isImageOnlyConfig, providerSupportsModalities, stripReasoningFields, hasExplicitReasoningRequest,
     buildRouteCacheKey, isReasoningConfiguredForModel,
     resolveReasoningEffort, countTokensFromContent,
     buildWebSearchEncryptedContent, buildCodeInterpreterSessionId,
     ensureToolCallThoughtSignatures, buildAnthropicWebSearchBlocks,
     getRequiredModalities,
 } from './helpers';
+import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 import {
     getCandidateModelsForProvider, getOptimizedBackends as getOptimizedBackendsFn, isGeminiProvider as isGeminiProviderFn,
 } from './routing';
@@ -99,7 +100,10 @@ export class AnthropicProxy {
     const fallback: OpenAIModelConfig[] = [];
 
     for ( const config of configs ) {
-      if ( isSttOrTtsOnlyConfig( config ) || isEmbeddingsEnabled( config ) || !providerSupportsModalities( config, requiredModalities ) ) continue;
+      // Never route Anthropic text/messages through image/STT/TTS/embeddings providers
+      if ( isSttOrTtsOnlyConfig( config ) || isEmbeddingsEnabled( config ) || isImageOnlyConfig( config ) || !providerSupportsModalities( config, requiredModalities ) ) continue;
+      if ( !providerHasHealthyTextModel( config ) ) continue;
+      if ( configHasModel( config, modelName ) && !isTextModelHealthy( config.id, modelName ) ) continue;
       if ( configHasModel( config, modelName ) ) exact.push( config );
       else if ( isAuto || config.randomRouting !== false ) fallback.push( config );
     }

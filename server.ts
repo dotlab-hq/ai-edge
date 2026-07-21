@@ -12,6 +12,7 @@ import { realtimeProxy } from "./src/core/RealtimeProxy";
 import { skillsProxy } from "./src/core/SkillsProxy";
 import { openAISkillsProxy } from "./src/core/OpenAISkillsProxy";
 import { initSkillResolver } from "./src/core/SkillResolver";
+import { probeAllTextModels } from "./src/utils/textModelProbe";
 
 const app = new Hono()
 
@@ -117,6 +118,15 @@ async function warmConfiguredUpstreamConnections() {
 
 // Load stats on initialization
 await loadStats();
+
+// Probe every text model (3 parallel attempts each) before serving traffic.
+// Image/STT/TTS/embeddings providers are excluded — only models that answer are used for text routing.
+try {
+    await probeAllTextModels();
+} catch ( error: any ) {
+    console.warn( `[startup] text_model_probe_failed error=${error?.message || String( error )}` );
+}
+
 warmConfiguredUpstreamConnections().catch( error => {
     console.warn( `[startup] upstream_connection_warmup_failed error=${error?.message || String( error )}` );
 } );

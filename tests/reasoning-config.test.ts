@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { OpenAIProxy } from '../src/core/OpenAIProxy';
 import { AnthropicProxy } from '../src/core/AnthropicProxy';
 import { CONFIG } from '../src/utils/schema.lookup';
+import { resetTextModelProbeStateForTests } from '../src/utils/textModelProbe';
 
 function baseProviderConfig(models: any[]): any {
   return {
@@ -293,6 +294,120 @@ test('OpenAIProxy image endpoints require explicit imageModels fields', () => {
     expect(generationBackends.map((backend: any) => backend.id)).toEqual(['image-gen']);
     expect(editBackends.map((backend: any) => backend.id)).toEqual(['image-edit']);
   } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('OpenAIProxy never routes text chat to image_generation/image_editing providers', () => {
+  const proxy = new OpenAIProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['flux']),
+      id: 'image-both',
+      embeddings: false,
+      imageModels: { image_generation: true, image_editing: true },
+    },
+    {
+      ...baseProviderConfig(['img-gen-only']),
+      id: 'image-gen',
+      embeddings: false,
+      imageModels: { image_generation: true },
+    },
+    {
+      ...baseProviderConfig(['img-edit-only']),
+      id: 'image-edit',
+      embeddings: false,
+      imageModels: { image_editing: true },
+    },
+  ] as any;
+
+  try {
+    for ( const endpoint of ['chat/completions', 'completions', 'responses', undefined] as const ) {
+      const backends = proxy.getBackendsForModel('unknown-model', endpoint);
+      expect(backends.map((backend: any) => backend.id)).toEqual(['text-only']);
+    }
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('AnthropicProxy never routes messages to image_generation/image_editing providers', () => {
+  const proxy = new AnthropicProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['text-model']),
+      id: 'text-only',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['flux']),
+      id: 'image-both',
+      embeddings: false,
+      imageModels: { image_generation: true, image_editing: true },
+    },
+  ] as any;
+
+  try {
+    const backends = proxy.getBackendsForModel('unknown-model');
+    expect(backends.map((backend: any) => backend.id)).toEqual(['text-only']);
+  } finally {
+    CONFIG.models.openai = originalOpenAI;
+  }
+});
+
+test('OpenAIProxy text routing only uses models that passed startup probe', () => {
+  const proxy = new OpenAIProxy() as any;
+  const originalOpenAI = CONFIG.models.openai;
+
+  CONFIG.models.openai = [
+    {
+      ...baseProviderConfig(['healthy-model', 'sick-model']),
+      id: 'primary',
+      embeddings: false,
+      imageModels: false,
+    },
+    {
+      ...baseProviderConfig(['other-healthy']),
+      id: 'secondary',
+      embeddings: false,
+      imageModels: false,
+    },
+  ] as any;
+
+  resetTextModelProbeStateForTests( {
+    completed: true,
+    skipped: false,
+    healthy: [
+      { providerId: 'primary', model: 'healthy-model' },
+      { providerId: 'secondary', model: 'other-healthy' },
+    ],
+  } );
+
+  try {
+    const backends = proxy.getBackendsForModel( 'unknown-model', 'chat/completions' );
+    expect( backends.map( ( backend: any ) => backend.id ).sort() ).toEqual( ['primary', 'secondary'] );
+
+    const primaryCandidates = proxy.getCandidateModelsForProvider(
+      CONFIG.models.openai!.find( ( c: any ) => c.id === 'primary' ),
+      'unknown-model',
+    );
+    expect( primaryCandidates ).toEqual( ['healthy-model'] );
+
+    const exactSick = proxy.getBackendsForModel( 'sick-model', 'chat/completions' );
+    expect( exactSick.map( ( backend: any ) => backend.id ) ).not.toContain( 'primary' );
+  } finally {
+    resetTextModelProbeStateForTests();
     CONFIG.models.openai = originalOpenAI;
   }
 });

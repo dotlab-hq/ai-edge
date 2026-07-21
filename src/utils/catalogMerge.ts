@@ -77,8 +77,13 @@ export function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): Unif
         if ( !config ) {
             return;
         }
-        // Skip non-chat providers from the model catalog (STT, TTS, embeddings, image-only)
-        if ( config.stt === true || config.tts === true || config.embeddings === true || config.imageModels ) {
+        // Skip non-chat providers from the model catalog (STT, TTS, embeddings, image gen/edit)
+        const imageModels = config.imageModels;
+        const isImageProvider = typeof imageModels === 'boolean'
+            ? imageModels
+            : ( typeof imageModels === 'object' && imageModels
+                && ( imageModels.image_generation === true || imageModels.image_editing === true ) );
+        if ( config.stt === true || config.tts === true || config.embeddings === true || isImageProvider ) {
             return;
         }
         allProviderNames.add( catalog.providerName );

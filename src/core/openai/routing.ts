@@ -1,40 +1,44 @@
 import { stripFreeModifier } from '@/utils/modelIds';
 import { CONFIG } from '@/utils/schema.lookup';
+import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 import { FAST_MODEL_HINTS } from './types';
 import type { BackendState, OpenAIModelConfig } from './types';
-import { isAutoModel, configHasModel, isEmbeddingsEnabled, isGeminiProvider } from '../routing/shared';
+import {
+    isAutoModel,
+    configHasModel,
+    isEmbeddingsEnabled,
+    isGeminiProvider,
+    isImageGenerationEnabled,
+    isImageEditingEnabled,
+    isImageOnlyConfig,
+    isSttEnabled,
+    isTtsEnabled,
+} from '../routing/shared';
 
-export { isAutoModel, configHasModel, isEmbeddingsEnabled, isGeminiProvider };
+export {
+    isAutoModel,
+    configHasModel,
+    isEmbeddingsEnabled,
+    isGeminiProvider,
+    isImageGenerationEnabled,
+    isImageEditingEnabled,
+    isImageOnlyConfig,
+    isSttEnabled,
+    isTtsEnabled,
+};
 
 const MAX_CACHE_SIZE = 1000;
 const BACKEND_CACHE_TTL_MS = 30_000;
 
-export function isSttEnabled( config: OpenAIModelConfig ): boolean {
-    return config.stt === true;
-}
-
-export function isTtsEnabled( config: OpenAIModelConfig ): boolean {
-    return config.tts === true;
-}
-
-export function isImageGenerationEnabled( config: OpenAIModelConfig ): boolean {
-    const imageModels = config.imageModels;
-    return typeof imageModels === 'object' && imageModels?.image_generation === true;
-}
-
-export function isImageEditingEnabled( config: OpenAIModelConfig ): boolean {
-    const imageModels = config.imageModels;
-    return typeof imageModels === 'object' && imageModels?.image_editing === true;
-}
-
-export function isImageOnlyConfig( config: OpenAIModelConfig ): boolean {
-    const imageModels = config.imageModels;
-    if ( typeof imageModels === 'boolean' ) return imageModels;
-    return imageModels?.image_generation === true || imageModels?.image_editing === true;
-}
-
 export function isSttOrImageOnlyConfig( config: OpenAIModelConfig ): boolean {
     return isSttEnabled( config ) || isTtsEnabled( config ) || isImageOnlyConfig( config );
+}
+
+function isTextChatEndpoint( endpoint?: string ): boolean {
+    return !endpoint
+        || endpoint === 'chat/completions'
+        || endpoint === 'completions'
+        || endpoint === 'responses';
 }
 
 export function getBackendsForModel(
@@ -68,8 +72,11 @@ export function getBackendsForModel(
             if ( !isImageGenerationEnabled( config ) ) continue;
         } else if ( endpoint === 'images/edits' ) {
             if ( !isImageEditingEnabled( config ) ) continue;
-        } else if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
+        } else if ( isTextChatEndpoint( endpoint ) ) {
+            // image_generation / image_editing providers must never serve text
             if ( isSttOrImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) ) continue;
+            if ( !providerHasHealthyTextModel( config ) ) continue;
+            if ( matchesRequestedModel && !isTextModelHealthy( config.id, modelName ) ) continue;
         }
 
         if ( matchesRequestedModel ) {
@@ -162,12 +169,24 @@ export function getCandidateModelsForProvider( state: BackendState, config: Open
     } );
     const isAutoModelFlag = explicitlyAuto || !modelInThisProvider;
 
-    if ( config.randomRouting === false && !isAutoModelFlag ) return [requestedModel];
+    const filterHealthy = ( models: string[] ): string[] => {
+        // Probe only applies to text providers; specialized (image/stt/etc.) stay unfiltered here.
+        if ( isImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) || isSttEnabled( config ) || isTtsEnabled( config ) ) {
+            return models;
+        }
+        return models.filter( modelName => isTextModelHealthy( config.id, modelName ) );
+    };
+
+    if ( config.randomRouting === false && !isAutoModelFlag ) {
+        return filterHealthy( [requestedModel] );
+    }
 
     const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-    if ( !isAutoModelFlag ) return [requestedModel];
-    const uniqueModels = Array.from( new Set( modelNames ) );
-    if ( !uniqueModels.length ) return [requestedModel];
+    if ( !isAutoModelFlag ) {
+        return filterHealthy( [requestedModel] );
+    }
+    const uniqueModels = filterHealthy( Array.from( new Set( modelNames ) ) );
+    if ( !uniqueModels.length ) return [];
 
     return uniqueModels.sort( ( left, right ) =>
         scoreModelForProvider( state, config, right ) - scoreModelForProvider( state, config, left )

@@ -17,7 +17,7 @@ import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { resolveAnthropicBody, isSkillResolverReady } from './SkillResolver';
-import { addRampartInstruction, createRampartGuard, transformRampartValue } from './RampartPII';
+import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -200,14 +200,7 @@ export class AnthropicProxy {
 
         try {
           const convertedRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
-          const rampartGuard = await createRampartGuard( config.PII_Rampart !== false );
-          const protectedRequest = rampartGuard
-            ? await transformRampartValue( convertedRequest, rampartGuard, false )
-            : convertedRequest;
-          const instructedRequest = rampartGuard
-            ? addRampartInstruction( protectedRequest )
-            : protectedRequest;
-          const withReasoning = this.withReasoningEffort( instructedRequest, body, config, selectedModel );
+          const withReasoning = this.withReasoningEffort( convertedRequest, body, config, selectedModel );
           const openAIRequest = this.isGeminiProvider( config )
             ? this.ensureToolCallThoughtSignatures( withReasoning )
             : withReasoning;
@@ -293,9 +286,7 @@ export class AnthropicProxy {
             continue;
           }
 
-          const responsePayload = rampartGuard
-            ? await transformRampartValue( payload, rampartGuard, true )
-            : payload as any;
+          const responsePayload = payload as any;
           const promptTokens = this.calculateTokenCount( body );
           const completionTokens = this.countTokensFromContent( responsePayload?.choices?.[0]?.message?.content ?? '' );
           const normalizedResponse = responsePayload.usage
@@ -388,8 +379,6 @@ export class AnthropicProxy {
     return c.json( errPayload, 502 );
   }
 
-  /** Rampart is deliberately limited to the Anthropic text messages path. */
-
   private async handleMessagesBatches( c: Context ) {
     return c.json(
       {
@@ -449,12 +438,25 @@ export class AnthropicProxy {
     const fallbackBackends: OpenAIModelConfig[] = [];
 
     for ( const config of configs ) {
-      // Skip STT-only, TTS-only, and embeddings providers for chat/messages routing
-      if ( this.isSttOrTtsOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) || !this.providerSupportsModalities( config, requiredModalities ) ) {
+      // Skip STT/TTS/embeddings/image providers for chat/messages routing
+      if (
+        this.isSttOrTtsOnlyConfig( config )
+        || this.isEmbeddingsEnabled( config )
+        || this.isImageOnlyConfig( config )
+        || !this.providerSupportsModalities( config, requiredModalities )
+      ) {
+        continue;
+      }
+
+      if ( !providerHasHealthyTextModel( config ) ) {
         continue;
       }
 
       const matchesRequestedModel = this.configHasModel( config, modelName );
+      if ( matchesRequestedModel && !isTextModelHealthy( config.id, modelName ) ) {
+        continue;
+      }
+
       if ( matchesRequestedModel ) {
         exactBackends.push( config );
       } else if ( isAutoModel || config.randomRouting !== false ) {
@@ -487,6 +489,18 @@ export class AnthropicProxy {
 
   private isSttOrTtsOnlyConfig( config: OpenAIModelConfig ): boolean {
     return config.stt === true || config.tts === true;
+  }
+
+  /** image_generation / image_editing providers must never serve text messages. */
+  private isImageOnlyConfig( config: OpenAIModelConfig ): boolean {
+    const imageModels = ( config as any ).imageModels;
+    if ( typeof imageModels === 'boolean' ) {
+      return imageModels;
+    }
+    if ( typeof imageModels !== 'object' || !imageModels ) {
+      return false;
+    }
+    return imageModels.image_generation === true || imageModels.image_editing === true;
   }
 
   private isGeminiProvider( config: OpenAIModelConfig ): boolean {

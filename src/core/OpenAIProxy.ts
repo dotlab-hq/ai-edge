@@ -34,14 +34,12 @@ import {
     type FileSearchCallItem,
 } from './ResponsesConversion';
 import { fileSearchManager, type FileSearchResponse } from './FileSearchManager';
-import { addRampartInstruction, createRampartGuard, transformRampartValue } from './RampartPII';
+import { isTextModelHealthy, providerHasHealthyTextModel } from '@/utils/textModelProbe';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 const AUTO_MODEL_ID = 'auto';
 const FAST_MODEL_HINTS = ['flash-lite', 'lite', 'mini', 'small', 'fast'];
-
-const RAMPART_TEXT_ENDPOINTS = new Set( ['chat/completions', 'responses', 'completions'] );
 
 export class OpenAIProxy {
     private app: Hono;
@@ -1066,16 +1064,7 @@ export class OpenAIProxy {
                 }
 
                 const requestWithModel = { ...body, model: selectedModel };
-                const rampartGuard = RAMPART_TEXT_ENDPOINTS.has( endpoint ) && config.PII_Rampart !== false
-                    ? await createRampartGuard( true )
-                    : null;
-                const protectedRequest = rampartGuard
-                    ? await transformRampartValue( requestWithModel, rampartGuard, false )
-                    : requestWithModel;
-                const instructedRequest = rampartGuard
-                    ? addRampartInstruction( protectedRequest )
-                    : protectedRequest;
-                const withReasoning = this.withReasoningEffort( instructedRequest, config, selectedModel );
+                const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
                 const upstreamBody = this.isGeminiProvider( config )
                     ? this.ensureToolCallThoughtSignatures( withReasoning )
                     : withReasoning;
@@ -1289,9 +1278,6 @@ export class OpenAIProxy {
 
                     // Convert chat/completions response back to Responses format if needed
                     let finalPayload = payload;
-                    if ( rampartGuard ) {
-                        finalPayload = await transformRampartValue( finalPayload, rampartGuard, true );
-                    }
                     if ( originalResponsesBody ) {
                         finalPayload = convertChatResponseToResponses( finalPayload, originalResponsesBody, fileSearchCalls );
                         // Ensure usage is present using chat body for token counting (Responses payload has responses-format usage)
@@ -1383,8 +1369,6 @@ export class OpenAIProxy {
             }
         }, 502 );
     }
-
-    /** Apply Rampart only to JSON text-generation payloads. Binary/audio/image/vector routes never call this. */
 
     private async prepareWebSearchForOpenAI( body: any, endpoint: string ): Promise<{
         body: any;
@@ -2088,6 +2072,7 @@ export class OpenAIProxy {
             const canRouteWithoutModelMatch = ( isAutoModel || config.randomRouting !== false ) && !matchesRequestedModel;
 
             // For capability-specific endpoints, only consider providers that explicitly support them.
+            // image_generation / image_editing providers must never serve text chat.
             if ( endpoint === 'embeddings' ) {
                 if ( !this.isEmbeddingsEnabled( config ) ) continue;
             } else if ( endpoint === 'audio/transcriptions' || endpoint === 'audio/translations' ) {
@@ -2098,8 +2083,11 @@ export class OpenAIProxy {
                 if ( !this.isImageGenerationEnabled( config ) ) continue;
             } else if ( endpoint === 'images/edits' ) {
                 if ( !this.isImageEditingEnabled( config ) ) continue;
-            } else if ( endpoint === 'chat/completions' || endpoint === 'completions' || endpoint === 'responses' ) {
+            } else {
+                // chat/completions, completions, responses, and default/undefined → text only
                 if ( this.isSttOrImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) ) continue;
+                if ( !providerHasHealthyTextModel( config ) ) continue;
+                if ( matchesRequestedModel && !isTextModelHealthy( config.id, modelName ) ) continue;
             }
 
             if ( matchesRequestedModel ) {
@@ -2273,17 +2261,24 @@ export class OpenAIProxy {
         // Unlisted models treated as auto-edge: pick best model from provider.
         const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
+        const filterHealthyText = ( models: string[] ): string[] => {
+            if ( this.isImageOnlyConfig( config ) || this.isEmbeddingsEnabled( config ) || this.isSttEnabled( config ) || this.isTtsEnabled( config ) ) {
+                return models;
+            }
+            return models.filter( modelName => isTextModelHealthy( config.id, modelName ) );
+        };
+
         if ( config.randomRouting === false && !isAutoModel ) {
-            return [requestedModel];
+            return filterHealthyText( [requestedModel] );
         }
 
         const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
         if ( !isAutoModel ) {
-            return [requestedModel];
+            return filterHealthyText( [requestedModel] );
         }
-        const uniqueModels = Array.from( new Set( modelNames ) );
+        const uniqueModels = filterHealthyText( Array.from( new Set( modelNames ) ) );
         if ( !uniqueModels.length ) {
-            return [requestedModel];
+            return [];
         }
 
         return uniqueModels.sort( ( left, right ) =>

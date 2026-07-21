@@ -1,5 +1,6 @@
 import { stripFreeModifier } from '@/utils/modelIds';
-import { configHasModel, isGeminiProvider } from '../routing/shared';
+import { configHasModel, isGeminiProvider, isImageOnlyConfig, isEmbeddingsEnabled, isSttEnabled, isTtsEnabled } from '../routing/shared';
+import { isTextModelHealthy } from '@/utils/textModelProbe';
 import { providerSupportsModalities, modelEntrySupportsModalities } from './helpers';
 
 type OpenAIModelConfig = any;
@@ -24,15 +25,23 @@ export function getCandidateModelsForProvider( config: OpenAIModelConfig, reques
         return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( requestedModel ).normalizedId;
     } );
     const isAuto = explicitlyAuto || !modelInThisProvider;
+
+    const filterHealthyText = ( models: string[] ): string[] => {
+        if ( isImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) || isSttEnabled( config ) || isTtsEnabled( config ) ) {
+            return models;
+        }
+        return models.filter( modelName => isTextModelHealthy( config.id, modelName ) );
+    };
+
     if ( config.randomRouting === false && !isAuto && providerSupportsModalities( config, requiredModalities ) ) {
-        return [requestedModel];
+        return filterHealthyText( [requestedModel] );
     }
     const modelNames = config.models
         .filter( ( model: any ) => modelEntrySupportsModalities( config, model, requiredModalities ) )
         .map( ( m: any ) => ( typeof m === 'string' ? m : m.model ) );
-    if ( !isAuto ) return [requestedModel];
-    const uniqueModels: string[] = Array.from( new Set( modelNames ) );
-    if ( !uniqueModels.length ) return [requestedModel];
+    if ( !isAuto ) return filterHealthyText( [requestedModel] );
+    const uniqueModels: string[] = filterHealthyText( Array.from( new Set( modelNames ) ) );
+    if ( !uniqueModels.length ) return [];
     const startIndex = Math.floor( Math.random() * uniqueModels.length );
     return [...uniqueModels.slice( startIndex ), ...uniqueModels.slice( 0, startIndex )];
 }
