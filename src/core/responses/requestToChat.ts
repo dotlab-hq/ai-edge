@@ -157,6 +157,8 @@ function flattenContent( content: unknown ): string | Array<Record<string, unkno
                     parts.push( { type: 'image_url', image_url: { url: block.image_url } } );
                 } else if ( t === 'image_url' && typeof ( block.image_url ?? block.url ) === 'string' ) {
                     parts.push( { type: 'image_url', image_url: { url: block.image_url ?? block.url } } );
+                } else if ( ( t === 'input_file' || t === 'file' || t === 'document' ) && ( block.file_id || block.id ) ) {
+                    parts.push( { type: 'text', text: `[File: ${block.file_id || block.id} — file attachments not supported via chat completions]` } );
                 } else if ( typeof block.text === 'string' ) {
                     parts.push( { type: 'text', text: block.text } );
                 }
@@ -171,6 +173,8 @@ function flattenContent( content: unknown ): string | Array<Record<string, unkno
             const t = block.type as string;
             if ( t === 'input_text' && typeof block.text === 'string' ) {
                 texts.push( block.text );
+            } else if ( ( t === 'input_file' || t === 'file' || t === 'document' ) && ( block.file_id || block.id ) ) {
+                texts.push( `[File: ${block.file_id || block.id} — file attachments not supported via chat completions]` );
             } else if ( typeof block.text === 'string' ) {
                 texts.push( block.text );
             }

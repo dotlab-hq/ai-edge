@@ -9,7 +9,7 @@
 import {
   isSkillResolverReady,
   resolveSkillContent,
-  resolveFileText,
+  resolveFileBinary,
 } from './resolver';
 
 /**
@@ -118,11 +118,21 @@ export async function resolveOpenAIBody( body: any ): Promise<void> {
 
   // ── 4. Resolve files and inject inline ────────────────
   if ( fileIds.size > 0 ) {
-    const fileCache = new Map<string, string>();
+    const fileCache = new Map<string, { text: string; mimeType: string }>();
     for ( const fileId of fileIds ) {
-      const resolved = await resolveFileText( fileId );
-      if ( resolved ) {
-        fileCache.set( fileId, resolved.text );
+      // Use resolveFileBinary so we can check MIME type before decoding
+      const binary = await resolveFileBinary( fileId );
+      if ( binary ) {
+        const mimeType = binary.mimeType.toLowerCase();
+        // PDFs and other binary files cannot be decoded as UTF-8 text
+        if ( mimeType === 'application/pdf' ) {
+          fileCache.set( fileId, { text: `[PDF attachment: ${binary.filename} — this provider does not support PDF input via chat completions. Try uploading the file via the Files API or using the Responses API.]`, mimeType } );
+        } else if ( mimeType.startsWith( 'text/' ) || mimeType === 'application/json' || mimeType === 'application/xml' ) {
+          fileCache.set( fileId, { text: binary.body.toString( 'utf-8' ), mimeType } );
+        } else {
+          // Other binary files — inject a placeholder
+          fileCache.set( fileId, { text: `[File: ${binary.filename} (${mimeType}) — binary content not supported via chat completions]`, mimeType } );
+        }
       }
     }
 
@@ -137,7 +147,7 @@ export async function resolveOpenAIBody( body: any ): Promise<void> {
           if ( part?.type === 'file' && part.file_id && fileCache.has( part.file_id ) ) {
             msg.content[i] = {
               type: 'text',
-              text: `[File: ${part.file_id}]\n${fileCache.get( part.file_id )}`,
+              text: `[File: ${part.file_id}]\n${fileCache.get( part.file_id )!.text}`,
             };
           }
         }
@@ -153,7 +163,7 @@ export async function resolveOpenAIBody( body: any ): Promise<void> {
             if ( part?.type === 'file' && part.file_id && fileCache.has( part.file_id ) ) {
               item.content[i] = {
                 type: 'input_text',
-                text: `[File: ${part.file_id}]\n${fileCache.get( part.file_id )}`,
+                text: `[File: ${part.file_id}]\n${fileCache.get( part.file_id )!.text}`,
               };
             }
           }

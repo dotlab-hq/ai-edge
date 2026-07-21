@@ -60,8 +60,12 @@ export function processUserContentBlocks(
                     } catch {
                         // If decode fails, skip
                     }
+                } else if ( mimeType === 'application/pdf' ) {
+                    // PDFs are not natively supported in OpenAI Chat Completions.
+                    // Inject a text placeholder rather than misrepresenting as image_url.
+                    userContent.push( { type: 'text', text: '[PDF attachment — this provider does not support PDF input via chat completions. Try uploading the file via the Files API or using the Responses API.]' } );
                 } else {
-                    // Binary document (PDF, image, etc.) - use data URL in image_url block
+                    // Other binary documents — use data URL in image_url block
                     const dataUrl = `data:${mimeType};base64,${source.data}`;
                     userContent.push( { type: 'image_url', image_url: { url: dataUrl } } );
                 }
@@ -178,8 +182,8 @@ export function processAssistantContentBlocks(
         const thoughtSignature = ( block as { _google?: { thought_signature?: string } } )?._google?.thought_signature
             || ( block as { extra_content?: { google?: { thought_signature?: string } } } )?.extra_content?.google?.thought_signature
             || FALLBACK_SIG;
-        (toolCall as any).function.thought_signature = thoughtSignature;
-        (toolCall as any).extra_content = {
+        ( toolCall as any ).function.thought_signature = thoughtSignature;
+        ( toolCall as any ).extra_content = {
             google: {
                 thought_signature: thoughtSignature,
             },
