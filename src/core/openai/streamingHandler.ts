@@ -63,7 +63,7 @@ export async function handleStreaming( args: StreamingArgs ): Promise<Response> 
             const clientSignal = c.req.raw.signal;
             const onClientAbort = () => {
                 clientDisconnected = true;
-                reader.cancel( 'client disconnected' ).catch( () => {} );
+                reader.cancel( 'client disconnected' ).catch( () => { } );
             };
             clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
@@ -77,12 +77,12 @@ export async function handleStreaming( args: StreamingArgs ): Promise<Response> 
                     }
                     if ( value ) {
                         const chunk = decoder.decode( value, { stream: true } );
-                        if ( chunk ) { await streamWriter.write( chunk ); heartbeat.kick(); }
+                        if ( chunk ) { await streamWriter.write( normalizeGeminiSseChunk( chunk ) ); heartbeat.kick(); }
                     }
                 }
                 if ( !clientDisconnected ) {
                     const tail = decoder.decode();
-                    if ( tail ) await streamWriter.write( tail );
+                    if ( tail ) await streamWriter.write( normalizeGeminiSseChunk( tail ) );
                     console.info( `[${endpoint}] stream_complete provider=${config.id} model=${selectedModel} totalMs=${Date.now() - requestStartedAt}` );
                 }
             } finally {
@@ -97,4 +97,30 @@ export async function handleStreaming( args: StreamingArgs ): Promise<Response> 
     }
 
     return c.json( { error: { message: 'No response body', type: 'internal_error' } }, 502 );
+}
+
+function normalizeGeminiSseChunk( chunk: string ): string {
+    return chunk.split( /(?<=\n)/ ).map( line => {
+        if ( !line.startsWith( 'data: ' ) || line.trim() === 'data: [DONE]' ) return line;
+        try {
+            const payload = JSON.parse( line.slice( 6 ) );
+            for ( const choice of Array.isArray( payload?.choices ) ? payload.choices : [] ) {
+                const delta = choice?.delta;
+                const thought = delta?.extra_content?.google?.thought === true;
+                if ( !delta ) continue;
+                if ( typeof delta.content === 'string' ) {
+                    const content = delta.content.replace( /<\/?thought>/gi, '' );
+                    if ( thought ) {
+                        delta.reasoning = content;
+                    } else {
+                        delta.content = content;
+                    }
+                }
+                if ( thought ) delete delta.extra_content;
+            }
+            return `data: ${JSON.stringify( payload )}\n`;
+        } catch {
+            return line;
+        }
+    } ).join( '' );
 }

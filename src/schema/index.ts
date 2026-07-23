@@ -66,6 +66,7 @@ const OpenAIModelSchema = z.object( {
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
+  extra: z.object( { isGemini: z.boolean( { error: 'extra.isGemini must be a boolean' } ).default( false ) } ).default( { isGemini: false } ),
   ...ReasoningConfigFields,
 } )
 
@@ -126,6 +127,7 @@ const AnthropicModelSchema = z.object( {
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
+  extra: z.object( { isGemini: z.boolean( { error: 'extra.isGemini must be a boolean' } ).default( false ) } ).default( { isGemini: false } ),
   ...ReasoningConfigFields,
 } )
 
@@ -266,3 +268,6 @@ export const ConfigSchema = z.object( {
 export type StateAdapter = z.infer<typeof StateAdapterSchema>
 export type Config = z.infer<typeof ConfigSchema>
 export { ConfigSchema as schema }
+
+
+

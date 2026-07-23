@@ -65,6 +65,20 @@ function buildMessagesFromResponsesInput( request: ResponsesRequest ): ChatMessa
         messages.push( { role: 'system', content: request.instructions } );
     }
 
+    // Compatibility: some OpenAI-compatible clients send chat-style `messages`
+    // to /v1/responses. Treat it as Responses input when `input` is absent.
+    const legacyMessages = ( request as { messages?: unknown } ).messages;
+    if ( request.input == null && Array.isArray( legacyMessages ) ) {
+        for ( const message of legacyMessages ) {
+            if ( !message || typeof message !== 'object' ) continue;
+            const role = ( message as { role?: unknown } ).role;
+            messages.push( {
+                ...( message as ChatMessage ),
+                role: role === 'developer' ? 'system' : role === 'assistant' || role === 'tool' || role === 'system' ? role : 'user',
+            } );
+        }
+        return messages;
+    }
     const inputItems = normaliseInputItems( request.input );
 
     for ( const item of inputItems ) {

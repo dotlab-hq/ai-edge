@@ -656,11 +656,6 @@
                 "description": "If true, this provider is reserved for text-to-speech routing (audio/speech) and excluded from chat/completions/responses/embeddings fallback",
                 "type": "boolean"
               },
-              "PII_Rampart": {
-                "default": true,
-                "description": "Apply Rampart PII protection to text-generation requests and responses only; excluded from image, audio, and vector-store routes",
-                "type": "boolean"
-              },
               "individualLimit": {
                 "default": false,
                 "type": "boolean"
@@ -717,6 +712,22 @@
                 "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
               },
+              "extra": {
+                "default": {
+                  "isGemini": false
+                },
+                "type": "object",
+                "properties": {
+                  "isGemini": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "isGemini"
+                ],
+                "additionalProperties": false
+              },
               "reasoning_efforts": {
                 "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                 "minItems": 1,
@@ -753,11 +764,11 @@
               "embeddings",
               "stt",
               "tts",
-              "PII_Rampart",
               "individualLimit",
               "baseUrl",
               "apiKey",
-              "randomRouting"
+              "randomRouting",
+              "extra"
             ],
             "additionalProperties": false
           }
@@ -983,11 +994,6 @@
                 "default": false,
                 "type": "boolean"
               },
-              "PII_Rampart": {
-                "default": true,
-                "description": "Apply Rampart PII protection to text-generation requests and responses only; excluded from image, audio, and vector-store routes",
-                "type": "boolean"
-              },
               "baseUrl": {
                 "type": "string",
                 "format": "uri"
@@ -1040,6 +1046,22 @@
                 "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
               },
+              "extra": {
+                "default": {
+                  "isGemini": false
+                },
+                "type": "object",
+                "properties": {
+                  "isGemini": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "isGemini"
+                ],
+                "additionalProperties": false
+              },
               "reasoning_efforts": {
                 "description": "Reasoning effort levels explicitly supported by this provider or model. Omit this field to disable proxy-injected reasoning defaults.",
                 "minItems": 1,
@@ -1074,10 +1096,10 @@
               "name",
               "models",
               "individualLimit",
-              "PII_Rampart",
               "baseUrl",
               "apiKey",
-              "randomRouting"
+              "randomRouting",
+              "extra"
             ],
             "additionalProperties": false
           }

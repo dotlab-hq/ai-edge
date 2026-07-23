@@ -22,7 +22,7 @@ import {
     getEffectiveRateLimit,
     fetchWithProxy,
 } from './helpers';
-import { withReasoningEffort } from './reasoning';
+import { withGeminiThinking, withReasoningEffort } from './reasoning';
 import type { BackendState, OpenAIModelConfig } from './types';
 import type { FileSearchCallItem } from '../ResponsesConversion';
 import { convertChatResponseToResponses } from '../ResponsesConversion';
@@ -53,6 +53,13 @@ export interface ProxyRequestResult {
  * Iterates candidate backends, builds the upstream request, applies rate limits /
  * cooldowns, and on success handles streaming vs. non-streaming responses.
  */
+function stripGeminiOption( body: any ): any {
+    if ( body?.extra?.gemini !== true ) return body;
+    const { extra, ...rest } = body;
+    const { gemini, ...remainingExtra } = extra;
+    return Object.keys( remainingExtra ).length ? { ...rest, extra: remainingExtra } : rest;
+}
+
 export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRequestResult> {
     const { c, state, endpoint } = args;
     const redirectDepth = args.redirectDepth ?? 1;
@@ -105,7 +112,7 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
 
             const requestWithModel = { ...body, model: selectedModel };
             const withReasoning = withReasoningEffort( requestWithModel, config, selectedModel );
-            const upstreamBody = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withReasoning ) : withReasoning;
+            const upstreamBody = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
 
             const tokens = calculateTokenCount( upstreamBody );
             const rateLimit = getEffectiveRateLimit( config );
@@ -232,9 +239,14 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
     }
 
     if ( lastFailure ) {
-        console.error( `\n❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})\nAttempted backends: ${backends.map( b => b.id ).join( ', ' )}` );
+        console.error( `
+❌ [${endpoint}] FINAL FAILURE (${lastFailure.status})
+Attempted backends: ${backends.map( b => b.id ).join( ', ' )}` );
         if ( isStreamingResponses ) return { response: sendResponsesStreamError( modelName, typeof lastFailure.payload === 'object' ? lastFailure.payload?.error?.message || JSON.stringify( lastFailure.payload ) : String( lastFailure.payload ) ) };
     }
 
     return { lastFailure: lastFailure ?? undefined };
 }
+
+
+

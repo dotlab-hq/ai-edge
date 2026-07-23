@@ -55,3 +55,15 @@ export function withReasoningEffort( body: any, config: OpenAIModelConfig, selec
 
     return { ...body, reasoning_effort: effort };
 }
+
+export function withGeminiThinking( body: any, selectedModel: string ): any {
+    if ( !body || typeof body !== 'object' ) return body;
+    const { reasoning_effort, reasoning, thinking, include_reasoning, output_reasoning, ...rest } = body;
+    const effort = typeof reasoning_effort === 'string' ? reasoning_effort : typeof reasoning?.effort === 'string' ? reasoning.effort : undefined;
+    if ( !effort ) return rest;
+    const isGemini25 = /gemini-2\.5/i.test( selectedModel );
+    if ( effort === 'none' && !isGemini25 ) throw new Error( 'reasoning_effort=none is only supported by Gemini 2.5 models' );
+    const config = rest.extra_body?.google?.thinking_config || {};
+    return { ...rest, extra_body: { ...( rest.extra_body || {} ), google: { ...( rest.extra_body?.google || {} ), thinking_config: { ...config, include_thoughts: true, ...( isGemini25 ? { thinking_budget: effort === 'none' ? 0 : ({ low: 1024, medium: 8192, high: 24576 } as Record<string, number>)[effort] ?? 8192 } : { thinking_level: effort === 'minimal' ? 'minimal' : effort } ) } } } };
+}
+

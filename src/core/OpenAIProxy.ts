@@ -1066,7 +1066,7 @@ export class OpenAIProxy {
                 const requestWithModel = { ...body, model: selectedModel };
                 const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
                 const upstreamBody = this.isGeminiProvider( config )
-                    ? this.ensureToolCallThoughtSignatures( withReasoning )
+                    ? this.ensureToolCallThoughtSignatures( this.withGeminiThinking( withReasoning, selectedModel ) )
                     : withReasoning;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
@@ -1214,7 +1214,7 @@ export class OpenAIProxy {
                                         if ( value ) {
                                             const chunk = decoder.decode( value, { stream: true } );
                                             if ( chunk ) {
-                                                await streamWriter.write( chunk );
+                                                await streamWriter.write( this.normalizeGeminiSseChunk( chunk ) );
                                                 heartbeat.kick();
                                             }
                                         }
@@ -1223,7 +1223,7 @@ export class OpenAIProxy {
                                     if ( !clientDisconnected ) {
                                         const tail = decoder.decode();
                                         if ( tail ) {
-                                            await streamWriter.write( tail );
+                                            await streamWriter.write( this.normalizeGeminiSseChunk( tail ) );
                                         }
                                     }
 
@@ -2143,14 +2143,44 @@ export class OpenAIProxy {
         return imageModels?.image_generation === true || imageModels?.image_editing === true;
     }
 
-    private isGeminiProvider( config: OpenAIModelConfig ): boolean {
-        const baseUrl = ( config.baseUrl || '' ).toLowerCase();
-        const id = ( config.id || '' ).toLowerCase();
-        const name = ( config.name || '' ).toLowerCase();
-        return baseUrl.includes( 'gemini' ) || baseUrl.includes( 'google' )
-            || id.includes( 'gemini' ) || id.includes( 'google' )
-            || name.includes( 'gemini' ) || name.includes( 'google' );
+    private normalizeGeminiSseChunk( chunk: string ): string {
+        return chunk.split( /(?<=\n)/ ).map( line => {
+            if ( !line.startsWith( 'data: ' ) || line.trim() === 'data: [DONE]' ) return line;
+            try {
+                const payload = JSON.parse( line.slice( 6 ) );
+                for ( const choice of Array.isArray( payload?.choices ) ? payload.choices : [] ) {
+                    const delta = choice?.delta;
+                    const thought = delta?.extra_content?.google?.thought === true;
+                    if ( !delta ) continue;
+                    if ( typeof delta.content === 'string' ) {
+                        const content = delta.content.replace( /<\/?thought>/gi, '' );
+                        if ( thought ) {
+                            delta.reasoning = content;
+                        } else {
+                            delta.content = content;
+                        }
+                    }
+                    if ( thought ) delete delta.extra_content;
+                }
+                return 'data: ' + JSON.stringify( payload ) + '\n';
+            } catch { return line; }
+        } ).join( '' );
     }
+
+    private withGeminiThinking( body: any, selectedModel: string ): any {
+        if ( !body || typeof body !== 'object' ) return body;
+        const { reasoning_effort, reasoning, thinking, include_reasoning, output_reasoning, ...rest } = body;
+        const effort = typeof reasoning_effort === 'string' ? reasoning_effort : typeof reasoning?.effort === 'string' ? reasoning.effort : undefined;
+        if ( !effort ) return rest;
+        const isGemini25 = /gemini-2\.5/i.test( selectedModel );
+        if ( effort === 'none' && !isGemini25 ) throw new Error( 'reasoning_effort=none is only supported by Gemini 2.5 models' );
+        const config = rest.extra_body?.google?.thinking_config || {};
+        return { ...rest, extra_body: { ...( rest.extra_body || {} ), google: { ...( rest.extra_body?.google || {} ), thinking_config: { ...config, include_thoughts: true, ...( isGemini25 ? { thinking_budget: effort === 'none' ? 0 : ( { low: 1024, medium: 8192, high: 24576 } as Record<string, number> )[effort] ?? 8192 } : { thinking_level: effort === 'minimal' ? 'minimal' : effort } ) } } } };
+    }
+    private isGeminiProvider( config: OpenAIModelConfig ): boolean {
+        return config.extra?.isGemini === true;
+    }
+
 
     private getRoundRobinBackends( modelName: string, backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
         if ( backends.length <= 1 ) {
@@ -2310,7 +2340,7 @@ export class OpenAIProxy {
             return this.stripReasoningFields( body );
         }
 
-        if ( body?.stream === true && !this.hasExplicitReasoningRequest( body ) ) {
+        if ( !this.hasExplicitReasoningRequest( body ) ) {
             return body;
         }
 
@@ -2384,11 +2414,37 @@ export class OpenAIProxy {
         return rest;
     }
 
+    private stripCompletionThoughtTags( payload: any ): any {
+        if ( !payload || typeof payload !== 'object' ) return payload;
+        for ( const choice of Array.isArray( payload.choices ) ? payload.choices : [] ) {
+            const message = choice?.message;
+            if ( message && typeof message === 'object' && typeof message.content === 'string' ) {
+                const thoughts: string[] = [];
+                message.content = message.content.replace( /<thought>([\s\S]*?)<\/thought>/gi, ( _match: string, thought: string ) => {
+                    thoughts.push( thought );
+                    return '';
+                } ).replace( /<\/?thought>/gi, '' );
+                if ( thoughts.length > 0 ) {
+                    const extracted = thoughts.join( '\n' );
+                    message.reasoning = typeof message.reasoning === 'string' && message.reasoning
+                        ? `${message.reasoning}\n${extracted}`
+                        : extracted;
+                }
+            }
+            for ( const field of ['reasoning', 'reasoning_content', 'thinking'] ) {
+                if ( typeof message?.[field] === 'string' ) message[field] = message[field].replace( /<\/?thought>/gi, '' );
+                if ( typeof choice?.delta?.[field] === 'string' ) choice.delta[field] = choice.delta[field].replace( /<\/?thought>/gi, '' );
+            }
+            if ( typeof choice?.delta?.content === 'string' ) choice.delta.content = choice.delta.content.replace( /<\/?thought>/gi, '' );
+            if ( typeof choice?.text === 'string' ) choice.text = choice.text.replace( /<\/?thought>/gi, '' );
+        }
+        return payload;
+    }
     private async parseResponsePayload( response: Response ): Promise<any> {
         const contentType = response.headers.get( 'content-type' ) ?? '';
 
         if ( contentType.includes( 'application/json' ) ) {
-            return response.json().catch( () => ( {
+            return response.json().then( payload => this.stripCompletionThoughtTags( payload ) ).catch( () => ( {
                 error: {
                     message: 'Upstream returned invalid JSON',
                     type: 'upstream_error'
@@ -2806,7 +2862,7 @@ export class OpenAIProxy {
                 },
                 output_tokens: completionTokens,
                 output_tokens_details: {
-                    reasoning_tokens: 0,
+                    reasoning_tokens: responseData?.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
                 },
                 total_tokens: promptTokens + completionTokens,
             };
@@ -3057,7 +3113,7 @@ export class OpenAIProxy {
                 const requestWithModel = { ...body, model: selectedModel };
                 const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
                 const upstreamBody = this.isGeminiProvider( config )
-                    ? this.ensureToolCallThoughtSignatures( withReasoning )
+                    ? this.ensureToolCallThoughtSignatures( this.withGeminiThinking( withReasoning, selectedModel ) )
                     : withReasoning;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
@@ -3125,3 +3181,12 @@ export class OpenAIProxy {
 }
 
 export const openAIProxy = new OpenAIProxy();
+
+
+
+
+
+
+
+
+

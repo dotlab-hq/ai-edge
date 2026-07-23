@@ -17,8 +17,15 @@ import {
     extractModelFromLocation,
     getEffectiveRateLimit,
 } from './helpers';
-import { withReasoningEffort } from './reasoning';
+import { withGeminiThinking, withReasoningEffort } from './reasoning';
 import type { BackendState, OpenAIModelConfig } from './types';
+
+function stripGeminiOption( body: any ): any {
+    if ( body?.extra?.gemini !== true ) return body;
+    const { extra, ...rest } = body;
+    const { gemini, ...remainingExtra } = extra;
+    return Object.keys( remainingExtra ).length ? { ...rest, extra: remainingExtra } : rest;
+}
 
 export async function processUpstreamWithFallback(
     state: BackendState,
@@ -61,7 +68,7 @@ export async function processUpstreamWithFallback(
 
             const requestWithModel = { ...body, model: selectedModel };
             const withReasoning = withReasoningEffort( requestWithModel, config, selectedModel );
-            const upstreamBody = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withReasoning ) : withReasoning;
+            const upstreamBody = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
 
             const tokens = calculateTokenCount( upstreamBody );
             const rateLimit = getEffectiveRateLimit( config );
@@ -120,3 +127,6 @@ export async function processUpstreamWithFallback(
         payload: { error: { message: 'All providers failed', type: 'internal_error' } },
     };
 }
+
+
+

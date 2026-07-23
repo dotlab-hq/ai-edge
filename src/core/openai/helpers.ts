@@ -196,10 +196,36 @@ export function extractModelFromLocation( location: string ): string | null {
     return null;
 }
 
+export function stripCompletionThoughtTags( payload: any ): any {
+    if ( !payload || typeof payload !== 'object' ) return payload;
+    for ( const choice of Array.isArray( payload.choices ) ? payload.choices : [] ) {
+        const message = choice?.message;
+        if ( message && typeof message === 'object' && typeof message.content === 'string' ) {
+            const thoughts: string[] = [];
+            message.content = message.content.replace( /<thought>([\s\S]*?)<\/thought>/gi, ( _match: string, thought: string ) => {
+                thoughts.push( thought );
+                return '';
+            } ).replace( /<\/?thought>/gi, '' );
+            if ( thoughts.length > 0 ) {
+                const extracted = thoughts.join( '\n' );
+                message.reasoning = typeof message.reasoning === 'string' && message.reasoning
+                    ? `${message.reasoning}\n${extracted}`
+                    : extracted;
+            }
+        }
+        for ( const field of [ 'reasoning', 'reasoning_content', 'thinking' ] ) {
+            if ( typeof message?.[field] === 'string' ) message[field] = message[field].replace( /<\/?thought>/gi, '' );
+            if ( typeof choice?.delta?.[field] === 'string' ) choice.delta[field] = choice.delta[field].replace( /<\/?thought>/gi, '' );
+        }
+        if ( typeof choice?.delta?.content === 'string' ) choice.delta.content = choice.delta.content.replace( /<\/?thought>/gi, '' );
+        if ( typeof choice?.text === 'string' ) choice.text = choice.text.replace( /<\/?thought>/gi, '' );
+    }
+    return payload;
+}
 export async function parseResponsePayload( response: Response ): Promise<any> {
     const contentType = response.headers.get( 'content-type' ) ?? '';
     if ( contentType.includes( 'application/json' ) ) {
-        return response.json().catch( () => ( { error: { message: 'Upstream returned invalid JSON', type: 'upstream_error' } } ) );
+        return response.json().then( stripCompletionThoughtTags ).catch( () => ( { error: { message: 'Upstream returned invalid JSON', type: 'upstream_error' } } ) );
     }
     const text = await response.text().catch( () => '' );
     if ( !text ) return { error: { message: response.statusText || 'Upstream request failed', type: 'upstream_error' } };

@@ -9,6 +9,10 @@ export function isDebugEnabled(): boolean {
 }
 
 export function redactForLog( value: unknown ): unknown {
+    // If debug is disabled, no need to redact values, as they won't be logged anyway.
+    if ( !_isDebugEnabled ) {
+        return value;
+    }
     return redactValue( value, new Set( ['apikey', 'api_key', 'authorization', 'x-api-key'] ) );
 }
 

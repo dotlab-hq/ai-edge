@@ -77,7 +77,7 @@ export class AnthropicProxy {
     // Save container.id for multi-turn passthrough (upstream does not support containers)
     const savedContainerId: string | undefined = rawBody?.container?.id;
     if ( isSkillResolverReady() ) {
-        await resolveAnthropicBody( rawBody );
+      await resolveAnthropicBody( rawBody );
     }
 
     const webSearchContext = await this.webSearchHandler.prepareAnthropicWebSearch( rawBody );
@@ -663,7 +663,7 @@ export class AnthropicProxy {
       return this.stripReasoningFields( openAIRequest );
     }
 
-    if ( openAIRequest?.stream === true && !this.hasExplicitReasoningRequest( sourceBody ) ) {
+    if ( !this.hasExplicitReasoningRequest( sourceBody ) ) {
       return openAIRequest;
     }
 

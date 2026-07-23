@@ -53,10 +53,7 @@ export function isNonTextSpecializedConfig( config: AnyProviderConfig ): boolean
 }
 
 export function isGeminiProvider( config: AnyProviderConfig ): boolean {
-    const baseUrl = ( config.baseUrl || '' ).toLowerCase();
-    const id = ( config.id || '' ).toLowerCase();
-    const name = ( config.name || '' ).toLowerCase();
-    return baseUrl.includes( 'gemini' ) || baseUrl.includes( 'google' )
-        || id.includes( 'gemini' ) || id.includes( 'google' )
-        || name.includes( 'gemini' ) || name.includes( 'google' );
+    return config.extra?.isGemini === true;
 }
+
+
